@@ -1,0 +1,13 @@
+x64-windows/
+x64-windows/include/
+x64-windows/include/sqlite_orm/
+x64-windows/include/sqlite_orm/sqlite_orm.h
+x64-windows/share/
+x64-windows/share/SqliteOrm/
+x64-windows/share/SqliteOrm/SqliteOrmConfig.cmake
+x64-windows/share/SqliteOrm/SqliteOrmConfigVersion.cmake
+x64-windows/share/SqliteOrm/SqliteOrmTargets.cmake
+x64-windows/share/sqlite-orm/
+x64-windows/share/sqlite-orm/copyright
+x64-windows/share/sqlite-orm/vcpkg.spdx.json
+x64-windows/share/sqlite-orm/vcpkg_abi_info.txt

@@ -1,0 +1,10 @@
+{
+  "name": "chartdisplay",
+  "version-string": "1.0.0",
+  "description": "Displays FAA Charts per ARTCC",
+  "dependencies": [
+    "libzip",
+	"sqlite-orm",
+	"pugixml"
+  ]
+}
