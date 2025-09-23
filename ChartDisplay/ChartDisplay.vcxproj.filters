@@ -57,5 +57,8 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="vcpkg.json" />
+    <None Include="..\x64\Release\chartdisplay.sqlite" />
+    <None Include="..\x64\Release\gpl-3.0.rtf" />
+    <None Include="..\x64\Release\InstallChartDisplay.nsi" />
   </ItemGroup>
 </Project>
