@@ -578,16 +578,19 @@ namespace charts {
 
 		//get last update date
 		auto db = GetDatabaseHandle();
+		ControlRecord default_autoupdate;
+		default_autoupdate.control_item = "autoupdate";
+		default_autoupdate.other = "false";
+		auto auresp = db.select(&ControlRecord::other, sql::where(sql::is_equal(&ControlRecord::control_item, "autoupdate")));
+		if (auresp.empty()) {
+			db.insert(default_autoupdate);
+		}
 		auto ctrlresp = db.select(&ControlRecord::date, sql::where(sql::is_equal(&ControlRecord::control_item, "last_charts_update")));
 		if (!ctrlresp.size()) { //always update if there is no charts
 			auto check = UpdateCharts(false,true); //skip date check
 			if (!check) {
 				throw NoDataException("Chart Update failed");
 			}
-			ControlRecord autoupdate;
-			autoupdate.control_item = "autoupdate";
-			autoupdate.other = "false";
-			db.insert(autoupdate);
 		}
 		else {
 			if (*AutoupdateState()) {
@@ -924,6 +927,7 @@ namespace charts {
 				throw NoDataException("TPP Zip open error.");
 			}
 		}
+		std::vector<std::pair<std::string,std::string>> bugfix_remove;
 		for (auto& c : charts_to_add) {
 			//if (c.useradded) {
 			//	//manual charts aren't in zips
@@ -936,6 +940,10 @@ namespace charts {
 			//	}
 			//}
 			//else {
+			if (c.airport_id == "JFK" && c.procedure_name == "PAWLING TWO") {
+				bugfix_remove.push_back(std::make_pair(c.airport_id, c.procedure_name));
+				continue;
+			}
 			for (auto& tz : tppzip) {
 				//first find if this is the correct archive
 				auto cfilename = c.chartpath.filename().string();
@@ -973,6 +981,16 @@ namespace charts {
 				}
 			}
 		//	}
+		}
+		if (!bugfix_remove.empty()) {
+			for (auto& [bfrai,bfrpn] : bugfix_remove) {
+				std::erase_if(charts_to_add, [&](ChartRecord item) {
+					if (item.airport_id == bfrai && item.procedure_name == bfrpn) {
+						return true;
+					}
+					else return false;
+					});
+			}
 		}
 		//copy artcc-wide additions, if any
 		//if (!artcc_wide_additions.empty()) {
@@ -1139,8 +1157,8 @@ namespace charts {
 			return std::nullopt;
 		}
 		else {
-			auto& aur = db.select(&ControlRecord::other, sql::where(sql::is_equal(&ControlRecord::control_item, "autoupdate"))).at(0);
-			return ((aur == "true") ? true : false);
+			auto aur = db.select(&ControlRecord::other, sql::where(sql::is_equal(&ControlRecord::control_item, "autoupdate")));
+			return ((aur.at(0) == "true") ? true : false);
 		}
 	}
 	AiracDates::AIRACInfo FAAChartProcessor::GetLastChartUpdate() const {
