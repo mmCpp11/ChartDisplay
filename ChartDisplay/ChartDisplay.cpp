@@ -129,7 +129,8 @@ int wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int
 			Win64Wrapper::MessageBoxStyles::DefaultButton1);
 		return 1;
 	}
-	Win64Wrapper::CommonControl::InitalizeCommonControls({ Win64Wrapper::ControlNames::Static,Win64Wrapper::ControlNames::ComboBox });
+	Win64Wrapper::CommonControl::InitalizeCommonControls({ Win64Wrapper::ControlNames::Static,Win64Wrapper::ControlNames::ComboBox,
+		Win64Wrapper::ControlNames::ListView});
 	WNDCLASSEX wc = {};
 	wc.cbSize = sizeof(WNDCLASSEX);
 	wc.hInstance = hInstance;
