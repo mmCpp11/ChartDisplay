@@ -458,8 +458,8 @@ namespace charts {
 		std::chrono::year_month_day base_airac_date;
 		std::string base_cycle;
 		if (rows.empty()) {
-			base_airac_date = 2025y/std::chrono::September/04d;
-			base_cycle = "2509";
+			base_airac_date = 2026y/std::chrono::June/11d;
+			base_cycle = "2606";
 		}
 		else {
 			base_airac_date = std::get<1>(rows.at(0)).value();
@@ -532,7 +532,10 @@ namespace charts {
 		auto chartupdatevec = db.select(
 			sql::columns(&ControlRecord::cycle, &ControlRecord::date),
 			sql::where(sql::is_equal(&ControlRecord::control_item, "last_charts_update")));
-		if (!chartupdatevec.empty()) {
+		//Whether a real prior chart-update row exists. On a fresh DB it won't, and we must NOT fabricate one:
+		//FAAChartProcessor treats an absent last_charts_update as "never downloaded" and forces the initial download.
+		const bool had_charts_update = !chartupdatevec.empty();
+		if (had_charts_update) {
 			auto [ccycle, cdate] = chartupdatevec.at(0);
 			chart_update_rec.cycle = ccycle;
 			chart_update_rec.date = cdate;
@@ -551,7 +554,9 @@ namespace charts {
 		auto guard = db.transaction_guard();
 		db.remove_all<ControlRecord>();
 		db.insert_range(ctrl_items.begin(), ctrl_items.end());
-		db.insert(chart_update_rec);
+		if (had_charts_update) {
+			db.insert(chart_update_rec);
+		}
 		db.insert(autoupdate_rec);
 		if (!control_only) {
 			db.remove_all<AIRACInfo>();
@@ -1220,8 +1225,11 @@ namespace charts {
 		auto db = GetDatabaseHandle();
 		auto retvec = db.select(sql::columns(&ControlRecord::cycle, &ControlRecord::date),
 			sql::where(sql::is_equal(&ControlRecord::control_item, "last_charts_update")));
-		auto& [c,d] = retvec.at(0);
 		AIRACInfo ai;
+		if (retvec.empty()) {
+			return ai; //no charts downloaded yet; default-constructed (cycle_id 0) reads as "never updated"
+		}
+		auto& [c,d] = retvec.at(0);
 		ai.cycle_id = c.value_or(0);
 		ai.date = d.value_or(std::chrono::year_month_day{});
 		return ai;

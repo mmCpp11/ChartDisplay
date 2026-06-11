@@ -152,13 +152,14 @@ namespace charts {
 		[[nodiscard]] const AIRACInfo GetNextAiracCycle() const noexcept;
 	private:
 
-		//Get the XHTML, grab the tables and parse out the dates and cycle numbers
+		//Generate the AIRAC cycle list arithmetically (fixed 28-day cadence) from a base cycle:
+		//the stored next_airacdates_update row if present, otherwise a hardcoded fallback base. No network access.
 		void GetAIRACDates();
 		void RetrieveData();
 		//cpf_airac_dates_only: do not update next_airacdates_update (basically just update current,next and previous airac)
 		void CommitData(bool control_only = false);
 		std::vector<AIRACInfo> cycles;
-		//read from file or parsed from AIRAC List, one before the last one on the list
+		//second-to-last cycle in the generated list; when the current date passes it, the list is regenerated forward
 		AIRACInfo next_autoupdate;
 		AIRACInfo current;
 		AIRACInfo previous;
