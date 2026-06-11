@@ -361,4 +361,13 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
-/ChartDisplay/log.txt
+
+# --- ChartDisplay project-specific ---
+# vcpkg toolchain clone (developers clone/bootstrap their own)
+/vcpkg/
+# vcpkg manifest-mode installed packages (regenerated from vcpkg.json)
+vcpkg_installed/
+# JetBrains IDE folder
+.idea/
+# Runtime log written by the app
+log.txt

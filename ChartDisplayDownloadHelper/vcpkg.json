@@ -1,8 +1,0 @@
-{
-  "name": "chartddisplaydownloadhelper",
-  "version-string": "1.0.0",
-  "description": "Helper program to download FAA Charts for the ChartDisplay program",
-  "dependencies": [
-    "cpr"
-  ]
-}
