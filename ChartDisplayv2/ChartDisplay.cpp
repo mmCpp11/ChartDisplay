@@ -20,23 +20,9 @@
 name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
 processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
-//Application Specific Messages
-//set the number of dynamic buttons for the window to render (unsigned int)
-//WPARAM: number LPARAM: 0
-#define WM_SETBTNDYNNUM (WM_APP + 0x0001)
-//get the number of dynamic buttons currently set
-//WPARAM: 0 LPARAM: pointer to unsigned long long to store the value
-#define WM_GETBTNDYNNUM (WM_APP + 0x0002)
-//clear the number of buttons WPARAM and LPARAM: 0
-#define WM_CLEARBTNDYNNUM (WM_APP + 0x0003)
-//transmit the colors of the buttons
-//WPARAM: 0 LPARAM: pointer to std::unordered_map<std::wstring,COLORREF> with the button color and airport id
-#define WM_BTNAPCLR (WM_APP + 0x0004)
-//clear the loaded colors in the Window Proc to prepare for a new button set WPARAM and LPARAM: 0
-#define WM_CLEARBTNAPCLR (WM_APP + 0x0005)
-//index of the last position of the artcc-related controls to enable removing and redrawing the airport based ones
-//WPARAM: index LPARAM: 0
-#define WM_SETLASTNAPCC (WM_APP + 0x0006)
+//Phase 1 of the control-system redesign removed the WM_APP custom messages that used to shuttle
+//button counts/colors/the artcc boundary index into window-proc statics. That per-window state now
+//lives in WindowControls (below) and is written directly via control_list, so no messaging is needed.
 
 import std;
 import BasicWindowsWrapperModule;
@@ -50,15 +36,31 @@ namespace std {
 std::size_t operator"" uz(unsigned long long p) { return p; }
 #endif
 
-using NumButtonsType = std::size_t;
 using ApMsgMap = std::unordered_map<std::wstring, COLORREF>;
 
 LRESULT ExtraWindowProc(HWND, UINT, WPARAM, LPARAM);
 INT_PTR CustomChartProc(HWND, UINT, WPARAM, LPARAM);
 
 charts::FAAChartProcessor* chartaccessor = nullptr;
-using CommonControlMap = std::unordered_map<HWND, std::vector<Win64Wrapper::CommonControl>>;
-using CCContainer = CommonControlMap::mapped_type;
+using CCContainer = std::vector<Win64Wrapper::CommonControl>;
+//Controls are grouped by lifecycle into sections. TopARTCC is created once in WM_CREATE and persists;
+//AirportSelect is cleared/rebuilt whenever the ARTCC changes; ChartControls is cleared/rebuilt whenever
+//an airport is chosen. This makes "redraw just this region" a single .clear() instead of the old
+//keep-by-id list plus a boundary index (the now-deleted num_buttons / artcc_control_index).
+enum class Section : std::size_t { TopARTCC, AirportSelect, ChartControls, Count };
+//Per-window control state: the sectioned controls plus the UI state that used to be shuttled into the
+//window proc via WM_APP custom messages. Writers mutate these directly through control_list.at(hwnd).
+struct WindowControls {
+	std::array<CCContainer, std::to_underlying(Section::Count)> sections;
+	ApMsgMap airport_button_colors;
+	std::wstring last_airport_clicked;
+	long button_border_width = 0;
+};
+//Convenience accessor for a section's control vector.
+inline CCContainer& Sec(WindowControls& wc, Section s) noexcept {
+	return wc.sections[std::to_underlying(s)];
+}
+using CommonControlMap = std::unordered_map<HWND, WindowControls>;
 CommonControlMap control_list;
 std::unique_ptr < std::remove_pointer_t<HWND>, decltype([](HWND ptr) {if (ptr) DestroyWindow(ptr);}) > custdlg;
 enum class ControlIDList : WORD {
@@ -99,6 +101,20 @@ inline CCContainer::iterator FindControl(CCContainer& ctrls, WORD id) {
 }
 inline CCContainer::iterator FindControl(CCContainer& ctrls, ControlIDList id) {
 	return FindControl(ctrls, std::to_underlying(id));
+}
+//Cross-section lookup: searches every section, returns a pointer to the control or nullptr. Use this
+//where the caller doesn't know (or care) which section holds the id (e.g. owner-draw by CtlID, an
+//airport-button click). Callers must copy any needed CommonControlParams immediately: a later
+//emplace_back into that section can reallocate its vector and dangle the returned pointer.
+inline Win64Wrapper::CommonControl* FindControl(WindowControls& wc, WORD id) {
+	auto all = wc.sections | std::views::join;
+	auto it = std::ranges::find_if(all, [id](const Win64Wrapper::CommonControl& cc) {
+		return cc.GetControlParams().id == id;
+		});
+	return it != all.end() ? &*it : nullptr;
+}
+inline Win64Wrapper::CommonControl* FindControl(WindowControls& wc, ControlIDList id) {
+	return FindControl(wc, std::to_underlying(id));
 }
 
 //border_ctrl_id is the position of the lowest control not wiped
@@ -175,16 +191,10 @@ LRESULT ExtraWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	using Win64Wrapper::PtrToLP;
 	using namespace Win64Wrapper::literals;
 	bool defwinproc = false;
-	static NumButtonsType num_buttons{};
-	static ApMsgMap airport_button_colors{};
-	static long button_border_width = {};
-	static std::wstring last_airport_clicked = {};
-	static size_t artcc_control_index = 0;
-	auto ResetARTCCControls = [](CCContainer& winctrls) {
-		if (artcc_control_index == 0) return;
-		auto first_erased_pos = artcc_control_index + 1;
-		if (winctrls.size() <= first_erased_pos) return;
-		winctrls.erase(std::next(winctrls.begin(), first_erased_pos), winctrls.end());
+	//Per-window state now lives in control_list.at(hwnd) (a WindowControls), not in proc statics.
+	//Switching airports just wipes the per-airport chart controls; the airport-select section stays put.
+	auto ResetARTCCControls = [](WindowControls& wc) {
+		Sec(wc, Section::ChartControls).clear();
 		};
 	auto OpenFileDefault = [](const std::filesystem::path& pth) {
 		namespace fs = std::filesystem;
@@ -218,7 +228,7 @@ LRESULT ExtraWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	//Draw Chart AIRAC Cycle label. During WM_CREATE the control_list item has not been created yet, so allow explict pass in
 	auto DrawAIRACLabel = [&hwnd](std::optional<std::reference_wrapper<CCContainer>> ctrls=std::nullopt,bool wmcreate = false){
 		Win64Wrapper::Window& winclass = Win64Wrapper::GetWindowFromHWND(hwnd);
-		CCContainer& winctrls = ctrls ? ctrls->get() : control_list.at(hwnd);
+		CCContainer& winctrls = ctrls ? ctrls->get() : Sec(control_list.at(hwnd), Section::TopARTCC);
 		if (!wmcreate) {
 			auto sairac_ctl = FindControl(winctrls, ControlIDList::StaticAIRAC);
 			if (sairac_ctl == winctrls.end())
@@ -307,7 +317,9 @@ LRESULT ExtraWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 				return FALSE;
 			}
 		}
-		control_list.insert(std::make_pair(hwnd, std::move(winctrls)));
+		WindowControls wc;
+		Sec(wc, Section::TopARTCC) = std::move(winctrls);
+		control_list.emplace(hwnd, std::move(wc));
 	}
 		break;
 	case WM_DESTROY:
@@ -338,14 +350,14 @@ LRESULT ExtraWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	}
 	case WM_SIZE:
 	{
-		CCContainer& ctrls = control_list.at(hwnd);
-		for (auto& cc : ctrls) {
+		auto& wc = control_list.at(hwnd);
+		for (auto& cc : wc.sections | std::views::join) {
 			auto id = cc.GetControlParams().id;
 			if (static_cast<ControlIDList>(id) == ControlIDList::ComboARTCC) {
 				SendMessage(hwnd, static_cast<UINT>(WM_COMMAND), MAKEWPARAM(id, CBN_SELCHANGE), PtrToLP(cc()));
 			}
 			if (id == std::to_underlying(ControlIDList::ComboAp)) {
-				OpenAirportCharts(last_airport_clicked, hwnd, button_border_width);
+				OpenAirportCharts(wc.last_airport_clicked, hwnd, wc.button_border_width);
 			}
 		}
 		break;
@@ -353,13 +365,13 @@ LRESULT ExtraWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	case WM_DRAWITEM:
 	{
 		auto draw_params = std::bit_cast<LPDRAWITEMSTRUCT>(lParam);
-		auto& winctrls = control_list.at(hwnd);
-		if (auto it = FindControl(winctrls, static_cast<WORD>(draw_params->CtlID)); it != winctrls.end()) {
+		auto& wc = control_list.at(hwnd);
+		if (auto* cc = FindControl(wc, static_cast<WORD>(draw_params->CtlID))) {
 			if (draw_params->CtlType == ODT_BUTTON) {
 				SIZE sz{};
-				std::wstring text = it->GetControlParams().text;
+				std::wstring text = cc->GetControlParams().text;
 				GetTextExtentPoint32(draw_params->hDC, text.c_str(), static_cast<int>(text.size()), &sz);
-				SetTextColor(draw_params->hDC, airport_button_colors.at(text));
+				SetTextColor(draw_params->hDC, wc.airport_button_colors.at(text));
 				SIZE coord_pos{ ((draw_params->rcItem.right - draw_params->rcItem.left) - sz.cx) / 2,
 					((draw_params->rcItem.bottom - draw_params->rcItem.top) - sz.cy) / 2 };
 				ExtTextOut(draw_params->hDC, coord_pos.cx, coord_pos.cy, ETO_OPAQUE | ETO_CLIPPED, &draw_params->rcItem, text.c_str(), text.size(), nullptr);
@@ -381,7 +393,7 @@ LRESULT ExtraWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 		switch (HIWORD(wParam)) {
 		case BN_CLICKED:
 		{
-			auto button_id_top = std::to_underlying(ControlIDList::DynamicButtonStart) + num_buttons;
+			auto& wc = control_list.at(hwnd);
 			if (ctl_id == std::to_underlying(ControlIDList::ButtonForceUpdate)) {
 				if (chartaccessor) {
 					auto check = Win64Wrapper::CreateMessageBox(L"Confirm Chart Upgrade?", L"Chart Upgrade", hwnd,
@@ -415,12 +427,13 @@ LRESULT ExtraWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 				}
 			}
 			//handle airport buttons
-			else if (ctl_id >= std::to_underlying(ControlIDList::DynamicButtonStart) && ctl_id < button_id_top) {
-				auto& winctrls = control_list.at(hwnd);
-				ResetARTCCControls(winctrls);
-				if (auto it = FindControl(winctrls, static_cast<WORD>(ctl_id)); it != winctrls.end()) {
-					last_airport_clicked = it->GetControlParams().text;
-					OpenAirportCharts(last_airport_clicked, hwnd, button_border_width);
+			//Dynamic airport buttons are the only controls with id >= DynamicButtonStart (fixed controls are
+			//all <= 124), so the lower bound alone identifies them; a stale id just yields a null FindControl.
+			else if (ctl_id >= std::to_underlying(ControlIDList::DynamicButtonStart)) {
+				ResetARTCCControls(wc);
+				if (auto* cc = FindControl(wc, static_cast<WORD>(ctl_id))) {
+					wc.last_airport_clicked = cc->GetControlParams().text;
+					OpenAirportCharts(wc.last_airport_clicked, hwnd, wc.button_border_width);
 				}
 			}
 			else {
@@ -450,20 +463,20 @@ LRESULT ExtraWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 			std::array<ControlIDList, 5> chart_control_ids = { ControlIDList::ComboAp,ControlIDList::ComboSTAR,ControlIDList::ComboIAP,
 				ControlIDList::ComboSID,ControlIDList::ComboManual };
 			std::string sel = Win64Wrapper::convert_string(selbuf);
+			auto& wc = control_list.at(hwnd);
 			//ARTCC selection change
 			if (boxid == std::to_underlying(ControlIDList::ComboARTCC)) {
 				const Win64Wrapper::Window& winclass = Win64Wrapper::GetWindowFromHWND(hwnd);
-				last_airport_clicked.clear();
+				wc.last_airport_clicked.clear();
 				if (sel == "Other") {
 					sel = "ZAE";
 				}
-				button_border_width = DrawDynamicARTCC(winclass, charts::rev_artcc_names_map.at(sel), ControlIDList::StaticARTCC);
+				wc.button_border_width = DrawDynamicARTCC(winclass, charts::rev_artcc_names_map.at(sel), ControlIDList::StaticARTCC);
 			}
 			else if (boxid == std::to_underlying(ControlIDList::ComboUntowered)) {
-				auto& winctrls = control_list.at(hwnd);
-				ResetARTCCControls(winctrls);
-				last_airport_clicked = selbuf;
-				OpenAirportCharts(selbuf, hwnd,button_border_width);
+				ResetARTCCControls(wc);
+				wc.last_airport_clicked = selbuf;
+				OpenAirportCharts(selbuf, hwnd, wc.button_border_width);
 			}
 			else if (boxid == std::to_underlying(ControlIDList::ComboManualARTCC)) {
 				//get artcc selection
@@ -498,7 +511,7 @@ LRESULT ExtraWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 				if (boxid == std::to_underlying(cid)) return true;
 				else return false;
 				});it != chart_control_ids.end()) {
-				auto acharts = chartaccessor->GetAirportCharts(Win64Wrapper::convert_string(last_airport_clicked));
+				auto acharts = chartaccessor->GetAirportCharts(Win64Wrapper::convert_string(wc.last_airport_clicked));
 				for (auto& c : acharts) {
 					if (c.procedure_name == sel) {
 						OpenFileDefault(c.chartpath);
@@ -511,32 +524,6 @@ LRESULT ExtraWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 		}
 		break;
 	}
-	//*************************
-	//Custom Messages
-	case WM_CLEARBTNDYNNUM:
-		num_buttons = 0;
-		break;
-	case WM_GETBTNDYNNUM:
-	{
-		auto* numbuf = std::bit_cast<NumButtonsType*>(lParam);
-		*numbuf = num_buttons;
-		break;
-	}
-	case WM_SETBTNDYNNUM:
-	{
-		num_buttons = static_cast<NumButtonsType>(wParam);
-		break;
-	}
-	case WM_BTNAPCLR:
-		airport_button_colors = *std::bit_cast<ApMsgMap*>(lParam);
-		break;
-	case WM_CLEARBTNAPCLR:
-		airport_button_colors.clear();
-		break;
-	case WM_SETLASTNAPCC:
-		artcc_control_index = wParam;
-		break;
-	//**************************
 	default:
 		return DefWindowProc(hwnd, msg, wParam, lParam);
 	}
@@ -554,21 +541,12 @@ LRESULT ExtraWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 //ButtonCustom,
 //CheckBoxAutoupdate,
 void ClearWindowARTCC(const Win64Wrapper::Window& win) {
-	using Win64Wrapper::CommonControl;
-	using namespace Win64Wrapper::literals;
-	//erase all controls except for the ARTCC combo box and label and the Force Upgrade button (which are the first 3 in the vector
-	auto& ctrls = control_list.at(win());
-	std::erase_if(ctrls, [](const CommonControl& cc) {
-		auto enum_id = static_cast<ControlIDList>(cc.GetControlParams().id);
-		std::array<ControlIDList, 7> ids_to_keep = { ControlIDList::StaticARTCC,ControlIDList::ComboARTCC,ControlIDList::ButtonForceUpdate,
-			ControlIDList::ButtonReload,ControlIDList::ButtonCustom,ControlIDList::CheckBoxAutoupdate, ControlIDList::StaticAIRAC };
-		if (std::ranges::find(ids_to_keep, enum_id) != ids_to_keep.end()) {
-			return false;
-		}
-		else return true;
-		});
-	SendMessage(win(), static_cast<UINT>(WM_CLEARBTNDYNNUM), 0_wp, 0_lp);
-	SendMessage(win(), static_cast<UINT>(WM_CLEARBTNAPCLR), 0_wp, 0_lp);
+	//Changing ARTCC keeps the persistent TopARTCC controls and drops the per-ARTCC airport-select controls
+	//along with any per-airport chart controls. Sectioning replaces the old keep-by-id list with two clears.
+	auto& wc = control_list.at(win());
+	Sec(wc, Section::AirportSelect).clear();
+	Sec(wc, Section::ChartControls).clear();
+	wc.airport_button_colors.clear();
 }
 LONG PopulateWindowARTCC(const Win64Wrapper::Window& win, const charts::ARTCC artcc, const ControlIDList border_ctrl_id) {
 	using Win64Wrapper::CommonControl;
@@ -584,14 +562,12 @@ LONG PopulateWindowARTCC(const Win64Wrapper::Window& win, const charts::ARTCC ar
 		ClassEGTowered = RGB(79, 17, 140)
 	};
 	const double MAX_BUTTON_AREA_SCALE = 0.45;
-	CCContainer& winctrls = control_list.at(win());
-	auto border_it = FindControl(winctrls, border_ctrl_id);
-	if (border_it == winctrls.end()) return 0;
-	CommonControlParams borderparams = border_it->GetControlParams();
-	//Get Airport list and set number of buttons needed (all class b, c and d airports)
+	auto& wc = control_list.at(win());
+	CCContainer& winctrls = Sec(wc, Section::AirportSelect);
+	auto* border_cc = FindControl(wc, border_ctrl_id);
+	if (!border_cc) return 0;
+	CommonControlParams borderparams = border_cc->GetControlParams();
 	auto alist = chartaccessor->GetAirspaceClassInfo(artcc);
-	SendMessage(win(), static_cast<UINT>(WM_SETBTNDYNNUM),
-		alist.class_b_airports.size() + alist.class_c_airports.size() + alist.class_d_airports.size(), 0_lp);
 	//assign colors
 	ApMsgMap btn_colors;
 	auto assign_colors = [&btn_colors](const std::vector<std::string>& airports, BtnColors color_to_use) {
@@ -606,15 +582,13 @@ LONG PopulateWindowARTCC(const Win64Wrapper::Window& win, const charts::ARTCC ar
 	assign_colors(alist.class_c_airports, BtnColors::ClassC);
 	assign_colors(alist.class_d_airports, BtnColors::ClassD);
 	assign_colors(alist.other_towered, BtnColors::ClassEGTowered);
-	//Send the Colors to the WindowProc
-	SendMessage(win(), static_cast<UINT>(WM_BTNAPCLR), 0_wp, PtrToLP(&btn_colors));
+	//Hand the owner-draw colors to the proc by storing them on the window's state.
+	wc.airport_button_colors = std::move(btn_colors);
 	//Class B and C static control label
 	CommonControlParams p_sbc{ ControlNames::Static,L"Class B and C Airports:",std::to_underlying(ControlIDList::StaticBC),
 		borderparams.posX,borderparams.posY + 50,WindowSize(190,20) };
 	winctrls.emplace_back(p_sbc , win , CommonControl::CommonStyles::StaticLeft);
 	// Dynamic Buttons
-	NumButtonsType num_buttons;
-	SendMessage(win(), static_cast<UINT>(WM_GETBTNDYNNUM), 0, PtrToLP(&num_buttons));
 	WindowSize btnsz{ 60,40 };
 	RECT winsz{};
 	GetClientRect(win(), &winsz);
@@ -729,8 +703,6 @@ LONG PopulateWindowARTCC(const Win64Wrapper::Window& win, const charts::ARTCC ar
 		}
 		pos_y += (p_saa.sz.height + 20);
 	}
-	//send the message to set the artcc-wide controls to make re-drawing airports easier
-	SendMessage(win(), static_cast<UINT>(WM_SETLASTNAPCC), winctrls.size() - 1, 0_lp);
 	return winsz.right;
 }
 void OpenAirportCharts(std::wstring airport,HWND main_window,LONG label_end_pos) {
@@ -744,10 +716,11 @@ void OpenAirportCharts(std::wstring airport,HWND main_window,LONG label_end_pos)
 	using namespace Win64Wrapper::literals;
 	using charts::ChartType;
 	Win64Wrapper::Window& win = Win64Wrapper::GetWindowFromHWND(main_window);
-	CCContainer& cwinctrls = control_list.at(main_window);
+	auto& wc = control_list.at(main_window);
+	CCContainer& cwinctrls = Sec(wc, Section::ChartControls);
 	CommonControlParams p_sbc = {};
-	if (auto it = FindControl(cwinctrls, ControlIDList::StaticBC); it != cwinctrls.end()) {
-		p_sbc = it->GetControlParams();
+	if (auto* cc = FindControl(wc, ControlIDList::StaticBC)) {
+		p_sbc = cc->GetControlParams();
 	}
 	std::string airportstr = Win64Wrapper::convert_string(airport);
 	auto ctypes = chartaccessor->GetAirportChartType(airportstr);
