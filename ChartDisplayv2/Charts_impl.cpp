@@ -348,7 +348,7 @@ namespace charts {
 		//Resolve the path and ensure its directory exists exactly once. GetDatabaseHandle is called very
 		//frequently; doing SHGetKnownFolderPath + a filesystem stat on every call was needless overhead.
 		static const std::string dbpath = [] {
-			auto p = Win64Wrapper::GetSysConfDefaultFilepath(Win64Wrapper::KnownFolderID::LocalAppData, true, "ChartDisplay", L"chartdisplay.sqlite");
+			auto p = Win64Wrapper::GetSysConfDefaultFilepath(Win64Wrapper::KnownFolderID::LocalAppData, false, "ChartDisplay", L"chartdisplay.sqlite");
 			try {
 				fs::create_directories(p.parent_path());
 			}
@@ -576,7 +576,7 @@ namespace charts {
 				if (it->date == thisday) {
 					current = *it;
 					next = *(it + 1);
-					previous = *(it - 1);
+					previous = it != cycles.begin() ? *(it - 1) : *it;
 				}
 				//it's not, so we've got the next cycle, so current is it - 1, and previous is it - 2, unless that's the beginning
 				else {
