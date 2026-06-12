@@ -16,6 +16,8 @@
 #include "framework.h"
 #include "Resource.h"
 #include <windowsx.h>
+#include <shellapi.h>
+#pragma comment(lib, "shell32")
 #pragma comment(linker,"\"/manifestdependency:type='win32' \
 name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
 processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
@@ -289,34 +291,37 @@ LRESULT ExtraWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	auto ResetARTCCControls = [](WindowControls& wc) {
 		Sec(wc, Section::ChartControls).clear();
 		};
-	auto OpenFileDefault = [](const std::filesystem::path& pth) {
-		namespace fs = std::filesystem;
-		fs::path viewerpath;
-		std::wstring commandline;
-		auto extension = pth.extension().native();
-		DWORD nec_buf_size = {};
-		std::wstring exe_fpath;
-		AssocQueryString(ASSOCF_NONE, ASSOCSTR_EXECUTABLE, extension.c_str(), L"open", nullptr, &nec_buf_size);
-		if (nec_buf_size == 0) {
-			Win64Wrapper::CreateMessageBox(
-				std::format(L"Please associate an application with the {} extension.", extension),
-				L"Error Opening Chart", nullptr, Win64Wrapper::MessageBoxStyles::Ok,
-				Win64Wrapper::MessageBoxStyles::DefaultButton1, Win64Wrapper::MessageBoxStyles::IconError);
-			throw fs::filesystem_error("Could not find associated application for filename",
-				std::error_code(static_cast<int>(std::errc::no_such_file_or_directory),std::system_category()));
+	auto OpenFileDefault = [hwnd](const std::filesystem::path& pth) {
+		//Open the file with its default handler through the shell, exactly like double-clicking it in
+		//Explorer. Unlike AssocQueryString(ASSOCSTR_EXECUTABLE) + CreateProcess, this works for UWP/Store
+		//apps (e.g. Photos) and protocol handlers, which have no plain exe to hand a path to. If nothing is
+		//associated, fall back to the shell "Open with" picker so the user can choose (and optionally set)
+		//an app -- so a default no longer has to be configured up front.
+		const std::wstring file = pth.native();
+		SHELLEXECUTEINFOW sei{ .cbSize = sizeof(SHELLEXECUTEINFOW) };
+		sei.fMask = SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI; //suppress the shell's own error UI; we handle it
+		sei.hwnd = hwnd;
+		sei.lpVerb = L"open";
+		sei.lpFile = file.c_str();
+		sei.nShow = SW_SHOWNORMAL;
+		if (ShellExecuteExW(&sei)) {
+			return;
 		}
-		exe_fpath.resize_and_overwrite(nec_buf_size, [&nec_buf_size, extension](wchar_t* buffer, size_t sz) -> size_t {
-			DWORD newsz = nec_buf_size;
-			auto comres = AssocQueryString(ASSOCF_NONE, ASSOCSTR_EXECUTABLE, extension.c_str(), L"open", buffer, &newsz);
-			if (comres == S_OK) return newsz;
-			else return 0;
-			});
-		exe_fpath.pop_back(); //remove unnecessary null terminator
-		viewerpath = exe_fpath;
-		auto command_line = std::format(LR"("{}" "{}")", viewerpath.filename().native(), pth.native());
-		Win64Wrapper::ProcCreationInfo pi;
-		auto ret = Win64Wrapper::CreateChildProcess(viewerpath, command_line, pi, true,
-			std::to_underlying(Win64Wrapper::ProcCreationFlags::NoConsoleNormal));
+		if (const DWORD err = GetLastError(); err == ERROR_NO_ASSOCIATION || err == SE_ERR_NOASSOC) {
+			SHELLEXECUTEINFOW openas{ .cbSize = sizeof(SHELLEXECUTEINFOW) };
+			openas.fMask = SEE_MASK_NOASYNC;
+			openas.hwnd = hwnd;
+			openas.lpVerb = L"openas"; //the "Open with..." dialog
+			openas.lpFile = file.c_str();
+			openas.nShow = SW_SHOWNORMAL;
+			if (ShellExecuteExW(&openas)) {
+				return;
+			}
+		}
+		Win64Wrapper::CreateMessageBox(
+			std::format(L"Could not open the file:\n{}\n(error {})", file, GetLastError()),
+			L"Error Opening Chart", hwnd, Win64Wrapper::MessageBoxStyles::Ok,
+			Win64Wrapper::MessageBoxStyles::DefaultButton1, Win64Wrapper::MessageBoxStyles::IconError);
 		};
 	//Draw Chart AIRAC Cycle label. During WM_CREATE the control_list item has not been created yet, so allow explict pass in
 	auto DrawAIRACLabel = [&hwnd](std::optional<std::reference_wrapper<CCContainer>> ctrls=std::nullopt,bool wmcreate = false){
