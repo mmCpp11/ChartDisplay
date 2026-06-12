@@ -2163,7 +2163,13 @@ namespace Win64Wrapper {
             data.type = data_type;
             data.data = lParamInit;
             if (auto hret = CreateDialogParam(inst, rid, parent, &DlgProcDispatch, PtrToLP(&data)); hret) {
-                dlg.reset(hret);
+                //CreateDialogParam sends WM_INITDIALOG synchronously, and DlgProcDispatch already stored the
+                //handle (dlg.reset(hWnd)) before we get here. Calling dlg.reset(hret) again would run
+                //unique_ptr's deleter on that same HWND -> DestroyWindow -> the dialog vanishes the instant
+                //it is created. Only adopt the handle if it wasn't already stored.
+                if (dlg.get() != hret) {
+                    dlg.reset(hret);
+                }
                 return true;
             }
             else return false;
