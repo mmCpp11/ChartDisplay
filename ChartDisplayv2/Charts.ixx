@@ -195,6 +195,8 @@ namespace charts {
 		{"APD",ChartType::APD},
 		{"DP",ChartType::SID},
 		{"ODP",ChartType::ODP},
+		//In cycle 2606, FAA metadata changed STAR to STR
+		{"STR",ChartType::STAR},
 		{"STAR",ChartType::STAR},
 		{"IAP",ChartType::IAP},
 		{"MIN",ChartType::MIN},
