@@ -48,7 +48,7 @@ SectionEnd
 Section "Uninstall"
 
 RMDir /r "$LOCALAPPDATA\ChartDisplay\Charts"
-RMDir /r "$LOCALAPPDATA\ChartDisplay\downloads"
+RMDir /r "$LOCALAPPDATA\ChartDisplay\download"
 Delete "$LOCALAPPDATA\ChartDisplay\chartdisplay.sqlite"
 
 Delete "$INSTDIR\ChartDisplayv2.exe"
