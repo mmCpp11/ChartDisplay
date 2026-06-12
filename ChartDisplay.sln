@@ -3,7 +3,7 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.14.36429.23 d17.14
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "ChartDisplay", "ChartDisplayv2\ChartDisplay.vcxproj", "{10D891D2-D8FE-45C2-B4F0-F4DCF30D759C}"
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "ChartDisplay", "ChartDisplay\ChartDisplay.vcxproj", "{10D891D2-D8FE-45C2-B4F0-F4DCF30D759C}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
