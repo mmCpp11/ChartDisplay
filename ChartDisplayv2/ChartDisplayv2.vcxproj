@@ -95,6 +95,15 @@
     <Manifest>
       <EnableDpiAwareness>PerMonitorHighDPIAware</EnableDpiAwareness>
     </Manifest>
+    <PostBuildEvent>
+      <Message>Staging release VC++ runtime DLLs next to the exe so the installer can bundle them</Message>
+      <Command>for /d %%D in ("$(VCInstallDir)Redist\MSVC\14.*") do @set "VCRT=%%D\x64\Microsoft.VC145.CRT"
+if not exist "%VCRT%\msvcp140.dll" exit /b 1
+xcopy /Y /D "%VCRT%\msvcp140.dll" "$(OutDir)"
+xcopy /Y /D "%VCRT%\msvcp140_atomic_wait.dll" "$(OutDir)"
+xcopy /Y /D "%VCRT%\vcruntime140.dll" "$(OutDir)"
+xcopy /Y /D "%VCRT%\vcruntime140_1.dll" "$(OutDir)"</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="BasicWindowsWrapperModule.ixx" />

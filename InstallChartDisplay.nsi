@@ -26,6 +26,13 @@ File sqlite3.dll
 File zip.dll
 File zlib1.dll
 
+; Release VC++ runtime, staged next to the exe by the Release post-build step. Bundling it app-local lets
+; the program launch on a machine without the VC++ 2015-2022 x64 redistributable installed.
+File msvcp140.dll
+File msvcp140_atomic_wait.dll
+File vcruntime140.dll
+File vcruntime140_1.dll
+
 SetOutPath "$INSTDIR\.."
 
 File "Third Party Licenses.txt"
@@ -57,6 +64,10 @@ Delete "$INSTDIR\pugixml.dll"
 Delete "$INSTDIR\sqlite3.dll"
 Delete "$INSTDIR\zip.dll"
 Delete "$INSTDIR\zlib1.dll"
+Delete "$INSTDIR\msvcp140.dll"
+Delete "$INSTDIR\msvcp140_atomic_wait.dll"
+Delete "$INSTDIR\vcruntime140.dll"
+Delete "$INSTDIR\vcruntime140_1.dll"
 Delete "$INSTDIR\uninstall.exe"
 
 RMDir "$INSTDIR"
