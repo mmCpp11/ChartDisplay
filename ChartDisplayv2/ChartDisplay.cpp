@@ -82,9 +82,11 @@ std::optional<Win64Wrapper::ModelessDiagBox> progdlg;
 std::jthread update_worker;
 std::mutex update_status_mtx;
 std::wstring update_status_text;
-//Launch the chart update (download + organize) on a worker thread behind the progress dialog. force=true
-//re-downloads regardless of cycle date; force=false only downloads if the current cycle is newer.
-void StartChartUpdate(HWND main_window, bool force);
+std::wstring update_done_label;   //"Chart update" / "Chart reload"; set by StartChartUpdate for the result box
+bool update_cancellable = true;   //false for a reload (the organize step can't be interrupted) -> disable Cancel
+//Run a chart operation on a worker thread behind the progress dialog. no_download=true reorganizes from the
+//already-downloaded zips (the Reload path, no network); force=true re-downloads regardless of cycle date.
+void StartChartUpdate(HWND main_window, bool no_download, bool force);
 INT_PTR ProgressDlgProc(HWND, UINT, WPARAM, LPARAM);
 enum class ControlIDList : WORD {
 	StaticARTCC = 101,
@@ -166,6 +168,10 @@ INT_PTR ProgressDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 	case WM_INITDIALOG:
 		//The bar already carries PBS_MARQUEE in the template; start its animation (30ms step).
 		SendDlgItemMessage(hwnd, IDC_PROGRESS1, PBM_SETMARQUEE, TRUE, 30);
+		//A reload can't be canceled mid-organize, so grey out Cancel rather than offer a dead button.
+		if (!update_cancellable) {
+			EnableWindow(GetDlgItem(hwnd, IDCANCEL), FALSE);
+		}
 		return TRUE;
 	case WM_APP_UPDATE_PROGRESS: {
 		std::wstring text;
@@ -184,30 +190,39 @@ INT_PTR ProgressDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 	}
 	return FALSE;
 }
-void StartChartUpdate(HWND main_window, bool force) {
+void StartChartUpdate(HWND main_window, bool no_download, bool force) {
 	using Win64Wrapper::MessageBoxStyles;
 	if (update_worker.joinable()) return; //an update is already running
-	{ std::scoped_lock lk(update_status_mtx); update_status_text = L"Preparing chart update..."; }
+	//A reload only re-organizes the existing zips (one opaque phase), so it shows a fixed message; a real
+	//update reports per-file download progress via the reporter below.
+	const std::wstring status = no_download ? L"Reloading charts..." : L"Preparing chart update...";
+	update_done_label = no_download ? L"Chart reload" : L"Chart update";
+	update_cancellable = !no_download; //a reload has nothing the worker can interrupt mid-organize
+	{ std::scoped_lock lk(update_status_mtx); update_status_text = status; }
 	progdlg.emplace(prog_hinst, IDD_DLGPROG, &ProgressDlgProc, main_window);
 	if (!progdlg->Display()) {
 		progdlg.reset();
-		Win64Wrapper::CreateMessageBox(L"Could not open the chart update dialog.", L"Chart Update", main_window,
+		Win64Wrapper::CreateMessageBox(L"Could not open the progress dialog.", update_done_label, main_window,
 			MessageBoxStyles::Ok, MessageBoxStyles::DefaultButton1, MessageBoxStyles::IconError);
 		return;
 	}
-	progdlg->UpdateDialogText(IDC_ST_PROG, L"Preparing chart update...");
-	//Block the main window for the update's duration: the worker owns the SQLite connection while it runs,
+	progdlg->UpdateDialogText(IDC_ST_PROG, status);
+	//Block the main window for the operation's duration: the worker owns the SQLite connection while it runs,
 	//so the UI thread must not touch the DB until it finishes (this avoids a cross-thread data race).
 	EnableWindow(main_window, FALSE);
 	HWND dlg = (*progdlg)();
-	update_worker = std::jthread([main_window, dlg, force](std::stop_token st) {
-		//reporter runs on this worker thread; it stages text then nudges the dialog to repaint it.
-		auto reporter = [dlg](const charts::UpdateStatus& s) {
-			{ std::scoped_lock lk(update_status_mtx); update_status_text = FormatUpdateStatus(s); }
-			PostMessage(dlg, WM_APP_UPDATE_PROGRESS, 0, 0);
-		};
+	update_worker = std::jthread([main_window, dlg, no_download, force](std::stop_token st) {
+		//For a download, the reporter stages per-file text and nudges the dialog. A reload has no measurable
+		//sub-steps, so it passes an empty reporter and the dialog keeps showing "Reloading charts...".
+		charts::UpdateReporter reporter{};
+		if (!no_download) {
+			reporter = [dlg](const charts::UpdateStatus& s) {
+				{ std::scoped_lock lk(update_status_mtx); update_status_text = FormatUpdateStatus(s); }
+				PostMessage(dlg, WM_APP_UPDATE_PROGRESS, 0, 0);
+			};
+		}
 		bool ok = false;
-		try { ok = chartaccessor->UpdateCharts(false, force, reporter, st); }
+		try { ok = chartaccessor->UpdateCharts(no_download, force, reporter, st); }
 		catch (...) { ok = false; }
 		PostMessage(main_window, WM_APP_UPDATE_DONE, ok ? 1 : 0, 0);
 	});
@@ -258,7 +273,7 @@ int wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int
 	//Kick off the initial/auto chart update now that a window exists to host the progress dialog and a
 	//message loop is about to run (the constructor no longer downloads; see ChartUpdateNeeded()).
 	if (auto need = chart.ChartUpdateNeeded(); need != charts::UpdateNeed::None) {
-		StartChartUpdate(win(), need == charts::UpdateNeed::Initial);
+		StartChartUpdate(win(), false, need == charts::UpdateNeed::Initial);
 	}
 
 	MSG msg;
@@ -499,16 +514,16 @@ LRESULT ExtraWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 					//If anything goes wrong in the creation or display of the Message Box, assume a No to prevent accidental updating of charts.
 					if (check == Win64Wrapper::MessageBoxResponse::Yes) {
 						//Runs on a worker thread behind a progress dialog; completion lands in WM_APP_UPDATE_DONE.
-						StartChartUpdate(hwnd, true);
+						StartChartUpdate(hwnd, false, true);
 					}
 				}
 			}
 			//reload button
 			else if (ctl_id == std::to_underlying(ControlIDList::ButtonReload)) {
 				if (chartaccessor) {
-					chartaccessor->UpdateCharts(true);
-					DrawAIRACLabel();
-					Win64Wrapper::CreateMessageBox(L"Full chart reload complete", L"Chart Reload", hwnd);
+					//Reorganize from the already-downloaded zips (no network) on a worker thread behind the
+					//marquee dialog; completion lands in WM_APP_UPDATE_DONE.
+					StartChartUpdate(hwnd, true, false);
 				}
 			}
 			//reload custom charts
@@ -632,12 +647,12 @@ LRESULT ExtraWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 		update_worker = {};         //join the (already finished) worker
 		DrawAIRACLabel();           //chart cycle may have changed; refresh the label
 		if (ok) {
-			Win64Wrapper::CreateMessageBox(L"Chart update complete.", L"Chart Update", hwnd);
+			Win64Wrapper::CreateMessageBox(std::format(L"{} complete.", update_done_label), update_done_label, hwnd);
 		}
 		else {
 			Win64Wrapper::CreateMessageBox(
-				L"The chart update did not complete (it was canceled or failed). Your existing charts were kept.",
-				L"Chart Update", hwnd, MessageBoxStyles::Ok, MessageBoxStyles::DefaultButton1, MessageBoxStyles::IconWarning);
+				L"The operation did not complete (it was canceled or failed). Your existing charts were kept.",
+				update_done_label, hwnd, MessageBoxStyles::Ok, MessageBoxStyles::DefaultButton1, MessageBoxStyles::IconWarning);
 		}
 		break;
 	}
