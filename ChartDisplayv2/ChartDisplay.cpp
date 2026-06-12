@@ -15,6 +15,7 @@
 // along with this program. If not, see <http://www.gnu.org/licenses/>.
 #include "framework.h"
 #include "Resource.h"
+#include "version.h"
 #include <windowsx.h>
 #include <shellapi.h>
 #pragma comment(lib, "shell32")
@@ -264,7 +265,8 @@ int wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int
 	Win64Wrapper::WindowSize sz{ 1623,933 }; //old size 831x595
 	Win64Wrapper::WindowStyles wstyle;
 	wstyle.extended_styles = WS_EX_APPWINDOW;
-	Win64Wrapper::Window win(wc, &ExtraWindowProc, sz, L"FAA Chart Display", true, Win64Wrapper::WindowLogger(L"log.txt"),wstyle);
+	auto window_title = std::format(L"FAA Chart Display {}.{}.{}", CD_VER_MAJOR, CD_VER_MINOR, CD_VER_PATCH);
+	Win64Wrapper::Window win(wc, &ExtraWindowProc, sz, window_title, true, Win64Wrapper::WindowLogger(L"log.txt"),wstyle);
 	auto res=win.DisplayWindow();
 	if (res == false) {
 		return 1;

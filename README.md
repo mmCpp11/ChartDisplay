@@ -2,7 +2,7 @@
 
 ChartDisplay is a chart viewer for VATSIM controllers. Each AIRAC cycle it downloads the FAA digital Terminal Procedures Publication (dTPP) charts and organizes them by ARTCC, airport, and chart type, and it lets you add your own custom charts.
 
-If you run the build output directly (rather than installing), keep `ChartDisplayv2.exe` and its DLLs together in one directory. The installer places everything for you — including the Visual C++ runtime — so it has no separate prerequisites.
+If you run the build output directly (rather than installing), keep `ChartDisplay.exe` and its DLLs together in one directory. The installer places everything for you — including the Visual C++ runtime — so it has no separate prerequisites.
 
 ## Data and storage
 

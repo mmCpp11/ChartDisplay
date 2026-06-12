@@ -19,7 +19,7 @@ Section
 
 SetOutPath "$INSTDIR"
 
-File ChartDisplayv2.exe
+File ChartDisplay.exe
 File bz2.dll
 File pugixml.dll
 File sqlite3.dll
@@ -45,7 +45,7 @@ SetOutPath "$INSTDIR"
 
 WriteUninstaller "$INSTDIR\uninstall.exe"
 
-CreateShortCut "$SMPROGRAMS\ChartDisplay\ChartDisplay.lnk" "$INSTDIR\ChartDisplayv2.exe"
+CreateShortCut "$SMPROGRAMS\ChartDisplay\ChartDisplay.lnk" "$INSTDIR\ChartDisplay.exe"
 CreateShortCut "$SMPROGRAMS\ChartDisplay\uninstall.lnk" "$INSTDIR\uninstall.exe"
 
 WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\$(^Name)" "DisplayName" "$(^Name)"
@@ -58,7 +58,7 @@ RMDir /r "$LOCALAPPDATA\ChartDisplay\Charts"
 RMDir /r "$LOCALAPPDATA\ChartDisplay\download"
 Delete "$LOCALAPPDATA\ChartDisplay\chartdisplay.sqlite"
 
-Delete "$INSTDIR\ChartDisplayv2.exe"
+Delete "$INSTDIR\ChartDisplay.exe"
 Delete "$INSTDIR\bz2.dll"
 Delete "$INSTDIR\pugixml.dll"
 Delete "$INSTDIR\sqlite3.dll"
