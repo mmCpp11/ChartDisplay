@@ -272,7 +272,7 @@ namespace charts {
 		std::string airport;
 		ARTCC artcc;
 		ChartType ctype;
-		wchar_t cls;
+		char cls;
 		std::string name;
 		std::filesystem::path filepath;
 		ManualXMLTag(CustomRecordType rectype, const std::filesystem::path& fp,std::optional<std::string> name,

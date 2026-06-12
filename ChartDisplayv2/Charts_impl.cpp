@@ -1423,11 +1423,7 @@ namespace charts {
 				}
 				aprec.append_attribute(attributes[0]).set_value(r.airport);
 				aprec.append_attribute(attributes[1]).set_value(artcc_names_map.at(r.artcc));
-				auto db = GetDatabaseHandle();
-				auto dbrec = db.select(&AirportRecord::airport_id, sql::where(sql::is_equal(&AirportRecord::airport_id, r.airport)));
-				if (dbrec.empty()) {
-					aprec.append_attribute(attributes[2]).set_value(r.cls);
-				}
+				aprec.append_attribute(attributes[2]).set_value(std::string{r.cls});
 			}
 			else if (r.rectype == CustomRecordType::ARTCCItem) {
 				if (r.name.empty() || (r.artcc == ARTCC::Empty)) return;

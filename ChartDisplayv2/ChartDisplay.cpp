@@ -1446,7 +1446,7 @@ INT_PTR CustomChartProc(HWND hdlg, UINT msg, WPARAM wParam, LPARAM lParam) {
 							auto ap = get_text(item, 2);
 							auto ctype = charts::charttype_names_map.at(get_text(item, 4));
 							char cls = get_text(item, 5).at(0);
-							xmlvec.emplace_back(charts::CustomRecordType::AirportItem, pth, name, artcc, ap, ctype, static_cast<wchar_t>(cls));
+							xmlvec.emplace_back(charts::CustomRecordType::AirportItem, pth, name, artcc, ap, ctype, cls);
 						}
 						else {
 							xmlvec.emplace_back(charts::CustomRecordType::ARTCCItem, pth, name, artcc);
