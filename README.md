@@ -1,27 +1,37 @@
 # ChartDisplay
-Make sure the ChartDisplay.exe, ChartDisplayDownloadHelper.exe and DLLs are in the same directory. If needed, the command line option --downloader-path can be passed to set the path of ChartDisplayDownloadHelper.
-This program uses a lot of storage (>5 GB) for the charts. It downloads them on first opening, and (if auto-update) is checked, after an airac cycle change.
-The directory for all the data of this program is Local App Data. If you need everything on a drive with more space, a symlink works with the name ChartDisplay in AppData\Local.
-The program keeps the zips around to reload the charts in case of problems, but this pushes the size to 10 GB. 
-If you do delete the downloaded zips, the only thing that will not work is the "Reload Charts" button, but if needed, the charts can be redownloaded with the "Force Charts Update" button.
-To delete the zips, remove everything in the download subdirectory of the ChartDisplay data directory, but keep the folder (AppData\Local\ChartDisplay\download).
-The whole process takes around 10-20 minutes and this happens before the window appears, so it just appears to do nothing.
-The displaying of items, including custom charts uses the default file association in Windows (although some apps, like photos don't work and MS Store apps have not been tested). Please make sure you have set up a PDF association,
-and if you are using other file types, associations for those as well.
 
-License info for third party software.
-pugixml:
-This software is based on pugixml library (http://pugixml.org). pugixml is Copyright (C) 2006-2023 Arseny Kapoulkine.
-sqlite_orm:
-sqlite_orm is distributed under the GNU Affero General Public License, version 3. See LICENSE for a copy of the license.
-sqlite3:
-SQLite is in the public domain
-cpr:
-C++ Requests (cpr) is under the MIT License, Copyright (c) 2017-2021 Huu Nguyen 
-Copyright (C) 2022 libcpr and many other contributorssee the LICENSE file for a copy.
-libcurl:
-Modified MIT License, see LICENSE file
-libzip:
-3 clause BSD. See LICENSE file.
-zlib: see LICENSE file.
-bzip2: see LICENSE file.
+ChartDisplay is a chart viewer for VATSIM controllers. Each AIRAC cycle it downloads the FAA digital Terminal Procedures Publication (dTPP) charts and organizes them by ARTCC, airport, and chart type, and it lets you add your own custom charts.
+
+If you run the build output directly (rather than installing), keep `ChartDisplayv2.exe` and its DLLs together in one directory. The installer places everything for you — including the Visual C++ runtime — so it has no separate prerequisites.
+
+## Data and storage
+
+All data lives in `%LOCALAPPDATA%\ChartDisplay`. The organized charts take several GB; the downloaded zip volumes are kept so the charts can be rebuilt without re-downloading, which pushes the total to roughly 8–10 GB. To put the data on a drive with more room, create a directory symlink named `ChartDisplay` in `%LOCALAPPDATA%`.
+
+To reclaim space, delete everything inside `%LOCALAPPDATA%\ChartDisplay\download` (keep the folder). The only consequence is that **Reload Charts** stops working; the charts can always be fetched again with **Force Chart Update**.
+
+## Downloading and updating
+
+On first run — and, if **Autoupdate on start** is enabled, after an AIRAC cycle change — the program downloads and organizes the charts. This happens *after* the main window opens, behind a progress dialog that shows the current file and phase; expect roughly 10–20 minutes.
+
+- **Force Chart Update** re-downloads the current cycle on demand (this can be cancelled).
+- **Reload Charts** rebuilds the organized charts from the already-downloaded zips, with no network access.
+
+## Opening charts
+
+Charts and custom items open with your Windows default app for the file type — exactly like double-clicking them in Explorer — so UWP/Microsoft Store apps such as Photos work. If a file type has no default, Windows' "Open with…" picker appears so you can choose (and optionally set) an app. A PDF-viewer association is recommended; set associations for any other chart file types you use.
+
+## Custom charts
+
+Custom charts are stored in `%LOCALAPPDATA%\ChartDisplay\custom_charts.xml` and edited through the **Custom Charts** dialog. A custom chart whose source file can't be found is dropped when the list is (re)loaded, so keep the referenced files in place — in particular, if a drive letter changes, update the paths before loading.
+
+## Third-party software
+
+Downloads are performed in-process with the Windows HTTP API (WinHTTP); ChartDisplay no longer uses a separate download helper, cpr, or libcurl.
+
+- **pugixml** — based on the pugixml library (http://pugixml.org), Copyright (C) 2006-2023 Arseny Kapoulkine.
+- **sqlite_orm** — GNU Affero General Public License, version 3. See LICENSE.
+- **sqlite3** — public domain.
+- **libzip** — 3-clause BSD. See LICENSE.
+- **zlib** — see LICENSE.
+- **bzip2** — see LICENSE.
