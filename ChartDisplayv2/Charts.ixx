@@ -113,7 +113,21 @@ namespace charts {
 		{"ZDC",ARTCC::ZDC}
 	};
 	//outpath: directory to download the cycle's chart/NASR files to. Downloads in-process via WinHTTP.
-	bool DoDownload(const std::filesystem::path& outpath, std::chrono::year_month_day airacdate);
+	//Phase of a chart update, for the UI progress reporter below.
+	export enum class UpdatePhase { Checking, Downloading, Organizing };
+	export struct UpdateStatus {
+		UpdatePhase phase;
+		int file_index = 0;   //1-based; valid for Downloading
+		int file_count = 0;
+		std::wstring file_name;
+	};
+	//UI-agnostic progress sink. UpdateCharts/DoDownload call this (on the worker thread) to report status;
+	//cancellation is separate, via the std::stop_token. Defaulted empty so non-UI callers are unaffected.
+	export using UpdateReporter = std::function<void(const UpdateStatus&)>;
+	//What kind of update the current DB state calls for (computed without side effects).
+	export enum class UpdateNeed { None, Initial, AutoupdateStale };
+	bool DoDownload(const std::filesystem::path& outpath, std::chrono::year_month_day airacdate,
+		const UpdateReporter& report = {}, std::stop_token st = {});
 	//Preflight: probes the FAA to see whether this cycle's files have been published, without downloading.
 	//Returns 0 if all files are reachable, 44 if not yet published (HTTP 404), another HTTP code otherwise,
 	//or -1 if the server could not be reached. Nothing is downloaded or modified.
@@ -270,8 +284,12 @@ namespace charts {
 		//charts will be moved from location specified by chartpath to MANUAL subdirectory next to all the other ARTCCs
 		//If chartpath does not exist or ChartType is not manual, it will be ignored.
 		FAAChartProcessor();
-		//force overrides no_download
-		bool UpdateCharts(bool no_download = false, bool force=false);
+		//force overrides no_download. report/st are optional: report sinks progress text, st cancels.
+		bool UpdateCharts(bool no_download = false, bool force = false,
+			const UpdateReporter& report = {}, std::stop_token st = {});
+		//What kind of update the current DB state calls for, computed without side effects so the UI can
+		//decide whether to launch the (worker-thread) update after the main window exists.
+		UpdateNeed ChartUpdateNeeded() const;
 		~FAAChartProcessor();
 		ARTCCInfo GetAirspaceClassInfo(ARTCC artcc);
 		//returns empty vector if the charts could not be returned

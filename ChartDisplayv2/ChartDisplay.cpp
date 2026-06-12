@@ -24,6 +24,12 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 //button counts/colors/the artcc boundary index into window-proc statics. That per-window state now
 //lives in WindowControls (below) and is written directly via control_list, so no messaging is needed.
 
+//Cross-thread UI signals for the chart-update worker. This IS the legitimate use of WM_APP + PostMessage:
+//marshaling from the worker thread to the UI thread (unlike the removed messages, which duplicated state
+//already held on the UI thread).
+#define WM_APP_UPDATE_PROGRESS (WM_APP + 0x0010)  //-> progress dialog: refresh status text from update_status_text
+#define WM_APP_UPDATE_DONE     (WM_APP + 0x0011)  //-> main window: wParam != 0 means success
+
 import std;
 import BasicWindowsWrapperModule;
 import Charts;
@@ -62,7 +68,22 @@ inline CCContainer& Sec(WindowControls& wc, Section s) noexcept {
 }
 using CommonControlMap = std::unordered_map<HWND, WindowControls>;
 CommonControlMap control_list;
-std::unique_ptr < std::remove_pointer_t<HWND>, decltype([](HWND ptr) {if (ptr) DestroyWindow(ptr);}) > custdlg;
+//The custom-charts dialog now uses the ModelessDiagBox wrapper too (it predated the wrapper and used a
+//raw CreateDialogW). Engaged while the dialog is open; its window is torn down in CustomChartProc's WM_CLOSE.
+std::optional<Win64Wrapper::ModelessDiagBox> custdlg;
+
+//Chart-update worker + its progress dialog. The worker runs UpdateCharts on its own thread; status text
+//is marshaled to the dialog via WM_APP_UPDATE_PROGRESS and completion to the main window via
+//WM_APP_UPDATE_DONE. update_status_text is shared between the worker (writer) and the dialog (reader).
+HINSTANCE prog_hinst = nullptr;
+std::optional<Win64Wrapper::ModelessDiagBox> progdlg;
+std::jthread update_worker;
+std::mutex update_status_mtx;
+std::wstring update_status_text;
+//Launch the chart update (download + organize) on a worker thread behind the progress dialog. force=true
+//re-downloads regardless of cycle date; force=false only downloads if the current cycle is newer.
+void StartChartUpdate(HWND main_window, bool force);
+INT_PTR ProgressDlgProc(HWND, UINT, WPARAM, LPARAM);
 enum class ControlIDList : WORD {
 	StaticARTCC = 101,
 	StaticBC,
@@ -127,6 +148,69 @@ LONG DrawDynamicARTCC(const Win64Wrapper::Window& win, const charts::ARTCC artcc
 }
 void OpenAirportCharts(std::wstring, HWND,LONG);
 
+//Build the user-facing status line for a given update phase. Marquee bar + this text is the whole UX:
+//the download is opaque per-byte and the organize step has no measurable progress, so text is honest.
+std::wstring FormatUpdateStatus(const charts::UpdateStatus& s) {
+	switch (s.phase) {
+	case charts::UpdatePhase::Checking:    return L"Checking chart availability...";
+	case charts::UpdatePhase::Downloading: return std::format(L"Downloading {} ({} of {})...", s.file_name, s.file_index, s.file_count);
+	case charts::UpdatePhase::Organizing:  return L"Extracting and organizing charts. This can take a while...";
+	}
+	return L"";
+}
+//Dialog proc for IDD_DLGPROG. Runs on the UI thread; the worker only PostMessages into it.
+INT_PTR ProgressDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+	switch (msg) {
+	case WM_INITDIALOG:
+		//The bar already carries PBS_MARQUEE in the template; start its animation (30ms step).
+		SendDlgItemMessage(hwnd, IDC_PROGRESS1, PBM_SETMARQUEE, TRUE, 30);
+		return TRUE;
+	case WM_APP_UPDATE_PROGRESS: {
+		std::wstring text;
+		{ std::scoped_lock lk(update_status_mtx); text = update_status_text; }
+		SetDlgItemText(hwnd, IDC_ST_PROG, text.c_str());
+		return TRUE;
+	}
+	case WM_COMMAND:
+		if (LOWORD(wParam) == IDCANCEL) {
+			update_worker.request_stop();
+			EnableWindow(GetDlgItem(hwnd, IDCANCEL), FALSE);
+			SetDlgItemText(hwnd, IDC_ST_PROG, L"Canceling, please wait...");
+			return TRUE;
+		}
+		break;
+	}
+	return FALSE;
+}
+void StartChartUpdate(HWND main_window, bool force) {
+	using Win64Wrapper::MessageBoxStyles;
+	if (update_worker.joinable()) return; //an update is already running
+	{ std::scoped_lock lk(update_status_mtx); update_status_text = L"Preparing chart update..."; }
+	progdlg.emplace(prog_hinst, IDD_DLGPROG, &ProgressDlgProc, main_window);
+	if (!progdlg->Display()) {
+		progdlg.reset();
+		Win64Wrapper::CreateMessageBox(L"Could not open the chart update dialog.", L"Chart Update", main_window,
+			MessageBoxStyles::Ok, MessageBoxStyles::DefaultButton1, MessageBoxStyles::IconError);
+		return;
+	}
+	progdlg->UpdateDialogText(IDC_ST_PROG, L"Preparing chart update...");
+	//Block the main window for the update's duration: the worker owns the SQLite connection while it runs,
+	//so the UI thread must not touch the DB until it finishes (this avoids a cross-thread data race).
+	EnableWindow(main_window, FALSE);
+	HWND dlg = (*progdlg)();
+	update_worker = std::jthread([main_window, dlg, force](std::stop_token st) {
+		//reporter runs on this worker thread; it stages text then nudges the dialog to repaint it.
+		auto reporter = [dlg](const charts::UpdateStatus& s) {
+			{ std::scoped_lock lk(update_status_mtx); update_status_text = FormatUpdateStatus(s); }
+			PostMessage(dlg, WM_APP_UPDATE_PROGRESS, 0, 0);
+		};
+		bool ok = false;
+		try { ok = chartaccessor->UpdateCharts(false, force, reporter, st); }
+		catch (...) { ok = false; }
+		PostMessage(main_window, WM_APP_UPDATE_DONE, ok ? 1 : 0, 0);
+	});
+}
+
 int wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nCmdShow) {
 	UNREFERENCED_PARAMETER(hPrevInstance);
 	UNREFERENCED_PARAMETER(nCmdShow);
@@ -136,6 +220,7 @@ int wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int
 		Win64Wrapper::CreateMessageBox(L"Usage: ChartDisplay.exe", L"Help");
 		return 0;
 	}
+	prog_hinst = hInstance;
 	charts::FAAChartProcessor chart;
 	chartaccessor = &chart;
 	//Init COM, then CommonControls
@@ -147,7 +232,7 @@ int wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int
 		return 1;
 	}
 	Win64Wrapper::CommonControl::InitalizeCommonControls({ Win64Wrapper::ControlNames::Static,Win64Wrapper::ControlNames::ComboBox,
-		Win64Wrapper::ControlNames::ListView});
+		Win64Wrapper::ControlNames::ListView,Win64Wrapper::ControlNames::ProgBar});
 	WNDCLASSEX wc = {};
 	wc.cbSize = sizeof(WNDCLASSEX);
 	wc.hInstance = hInstance;
@@ -168,11 +253,19 @@ int wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int
 		return 1;
 	}
 
+	//Kick off the initial/auto chart update now that a window exists to host the progress dialog and a
+	//message loop is about to run (the constructor no longer downloads; see ChartUpdateNeeded()).
+	if (auto need = chart.ChartUpdateNeeded(); need != charts::UpdateNeed::None) {
+		StartChartUpdate(win(), need == charts::UpdateNeed::Initial);
+	}
+
 	MSG msg;
 	auto acceltable = LoadAccelerators(hInstance, MAKEINTRESOURCE(IDC_CHARTDISPLAY));
 	while (GetMessage(&msg, NULL, 0, 0) > 0) {
+		HWND prog_hwnd = progdlg ? (*progdlg)() : nullptr;
+		HWND cust_hwnd = custdlg ? (*custdlg)() : nullptr;
 		if (auto accmsg = TranslateAccelerator(msg.hwnd,acceltable,&msg);
-			( accmsg==0 && !IsDialogMessage(custdlg.get(), &msg))) {
+			( accmsg==0 && !IsDialogMessage(cust_hwnd, &msg) && !IsDialogMessage(prog_hwnd, &msg))) {
 			TranslateMessage(&msg);
 			DispatchMessage(&msg);
 		}
@@ -400,9 +493,8 @@ LRESULT ExtraWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 						MessageBoxStyles::AppModal, MessageBoxStyles::IconWarning, MessageBoxStyles::DefaultButton2, MessageBoxStyles::YesNo);
 					//If anything goes wrong in the creation or display of the Message Box, assume a No to prevent accidental updating of charts.
 					if (check == Win64Wrapper::MessageBoxResponse::Yes) {
-						chartaccessor->UpdateCharts(false,true);
-						DrawAIRACLabel();
-						Win64Wrapper::CreateMessageBox(L"Full chart updating and processing complete", L"Force Chart Update", hwnd);
+						//Runs on a worker thread behind a progress dialog; completion lands in WM_APP_UPDATE_DONE.
+						StartChartUpdate(hwnd, true);
 					}
 				}
 			}
@@ -416,8 +508,9 @@ LRESULT ExtraWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 			}
 			//reload custom charts
 			else if (ctl_id == std::to_underlying(ControlIDList::ButtonCustom)) {
-				auto hinst = std::bit_cast<HINSTANCE>(GetWindowLongPtr(hwnd, GWLP_HINSTANCE));
-				custdlg.reset(CreateDialogW(hinst, MAKEINTRESOURCEW(IDD_CUSTCHART), hwnd, &CustomChartProc));
+				//emplace replaces any previous instance (its window, if still open, is torn down by the dtor).
+				custdlg.emplace(prog_hinst, IDD_CUSTCHART, &CustomChartProc, hwnd);
+				custdlg->Display();
 			}
 			//CWT button
 			else if (ctl_id == std::to_underlying(ControlIDList::ButtonCWT)) {
@@ -521,6 +614,25 @@ LRESULT ExtraWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 			}
 			break;
 		}
+		}
+		break;
+	}
+	//Posted by the chart-update worker thread when it finishes (wParam != 0 on success). Runs on the UI
+	//thread, so it is safe to touch the DB/controls again here.
+	case WM_APP_UPDATE_DONE:
+	{
+		const bool ok = wParam != 0;
+		EnableWindow(hwnd, TRUE);   //re-enable the main window before tearing down the dialog
+		progdlg.reset();            //destroy the progress dialog
+		update_worker = {};         //join the (already finished) worker
+		DrawAIRACLabel();           //chart cycle may have changed; refresh the label
+		if (ok) {
+			Win64Wrapper::CreateMessageBox(L"Chart update complete.", L"Chart Update", hwnd);
+		}
+		else {
+			Win64Wrapper::CreateMessageBox(
+				L"The chart update did not complete (it was canceled or failed). Your existing charts were kept.",
+				L"Chart Update", hwnd, MessageBoxStyles::Ok, MessageBoxStyles::DefaultButton1, MessageBoxStyles::IconWarning);
 		}
 		break;
 	}
@@ -1300,7 +1412,10 @@ INT_PTR CustomChartProc(HWND hdlg, UINT msg, WPARAM wParam, LPARAM lParam) {
 		break;
 	}
 	case WM_CLOSE:
-		custdlg.reset();
+		//Destroy just the window here, not custdlg itself: resetting the owning optional from inside its own
+		//dialog callback would destroy the std::function mid-invocation (delete-this hazard). The optional is
+		//replaced on the next open via emplace.
+		DestroyWindow(hdlg);
 		break;
 	default:
 		return FALSE;

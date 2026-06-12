@@ -294,7 +294,8 @@ namespace charts {
 		}
 	}
 
-	bool DoDownload(const fs::path& outpath, std::chrono::year_month_day airacdate) {
+	bool DoDownload(const fs::path& outpath, std::chrono::year_month_day airacdate,
+		const UpdateReporter& report, std::stop_token st) {
 		using namespace std::chrono_literals;
 		try {
 			fs::create_directories(outpath);
@@ -312,7 +313,13 @@ namespace charts {
 			outpath / "TPPA.zip", outpath / "TPPB.zip", outpath / "TPPC.zip", outpath / "TPPD.zip", outpath / "TPPE.zip"
 		};
 		for (std::size_t i = 0; i < urls.size(); ++i) {
-			auto res = Net::HttpDownloadToFile(urls[i], destinations[i]);
+			if (st.stop_requested()) return false; //canceled between files
+			if (report) report({ UpdatePhase::Downloading, static_cast<int>(i + 1),
+				static_cast<int>(urls.size()), destinations[i].filename().wstring() });
+			//Per-file byte callback exists only to honor cancellation mid-stream (these are large files).
+			auto res = Net::HttpDownloadToFile(urls[i], destinations[i],
+				[&st](unsigned long long, unsigned long long) { return !st.stop_requested(); });
+			if (st.stop_requested()) return false; //user canceled: not a real failure, so no error box
 			if (!res) {
 				std::wstring detail = res.transport_ok ? std::format(L"HTTP {}", res.status_code) : res.error;
 				Win64Wrapper::CreateMessageBox(std::format(L"Failed to download:\n{}\n({})", urls[i], detail), L"Download Failure");
@@ -612,28 +619,25 @@ namespace charts {
 		if (auresp.empty()) {
 			db.insert(default_autoupdate);
 		}
-		auto ctrlresp = db.select(&ControlRecord::date, sql::where(sql::is_equal(&ControlRecord::control_item, "last_charts_update")));
-		if (!ctrlresp.size()) { //always update if there is no charts
-			auto check = UpdateCharts(false,true); //skip date check
-			if (!check) {
-				throw NoDataException("Chart Update failed");
-			}
-		}
-		else {
-			if (*AutoupdateState()) {
-				decltype(ControlRecord::date) date = ctrlresp.at(0);
-				if (date.value() < current_cycle.GetCurrentAiracCycle().date) {
-					auto check = UpdateCharts();
-					if (!check) {
-						throw NoDataException("Chart Update failed");
-					}
-				}
-
-			}
-		}
+		//Downloads no longer happen in the constructor: doing ~4GB of I/O here froze startup before any
+		//window existed, so a progress dialog was impossible. The UI queries ChartUpdateNeeded() after the
+		//main window is up and runs the update on a worker thread with a progress dialog.
 		OutputDebugString(L"End Chart initalization.\n");
 	}
-	bool FAAChartProcessor::UpdateCharts(bool no_download, bool force) {
+	UpdateNeed FAAChartProcessor::ChartUpdateNeeded() const {
+		auto db = GetDatabaseHandle();
+		auto lcu = db.select(&ControlRecord::date, sql::where(sql::is_equal(&ControlRecord::control_item, "last_charts_update")));
+		if (lcu.empty()) {
+			return UpdateNeed::Initial; //no charts have ever been downloaded
+		}
+		auto au = db.select(&ControlRecord::other, sql::where(sql::is_equal(&ControlRecord::control_item, "autoupdate")));
+		const bool autoupdate_on = !au.empty() && au.at(0).has_value() && au.at(0).value() == "true";
+		if (autoupdate_on && lcu.at(0).has_value() && lcu.at(0).value() < current_cycle.GetCurrentAiracCycle().date) {
+			return UpdateNeed::AutoupdateStale;
+		}
+		return UpdateNeed::None;
+	}
+	bool FAAChartProcessor::UpdateCharts(bool no_download, bool force, const UpdateReporter& report, std::stop_token st) {
 		using Win64Wrapper::MessageBoxStyles;
 		auto tempdir = Win64Wrapper::GetSysConfDefaultFilepath(Win64Wrapper::KnownFolderID::LocalAppData, false, R"(ChartDisplay\download)");
 		try {
@@ -653,9 +657,10 @@ namespace charts {
 		//no donwload = true force = false download: no (no_download=true)
 		//no download = false force = false download: depending on check
 		bool check = false;
-		auto trigger_download = [this](const fs::path& tempdir,std::chrono::year_month_day cdate) -> bool {
+		auto trigger_download = [this, &report, &st](const fs::path& tempdir,std::chrono::year_month_day cdate) -> bool {
 			//Preflight: confirm the FAA has actually published this cycle before touching anything.
 			//Nothing has been wiped yet, so an unavailable cycle leaves the existing charts fully intact.
+			if (report) report({ UpdatePhase::Checking });
 			auto avail = CheckCycleAvailability(cdate);
 			if (avail == 44) {
 				Win64Wrapper::CreateMessageBox(
@@ -685,7 +690,7 @@ namespace charts {
 			}
 			//The helper overwrites each zip in place (truncate on open), so no pre-clean is needed and we
 			//never use 2x disk. The organized chart tree stays untouched until GetChartsAndOrganize succeeds.
-			return DoDownload(tempdir, cdate);
+			return DoDownload(tempdir, cdate, report, st);
 		};
 		if (force) {
 			check = trigger_download(tempdir, cdate);
@@ -711,6 +716,8 @@ namespace charts {
 			}
 		}
 		if (!check) return false;
+		if (st.stop_requested()) return false; //canceled after download, before the long organize step
+		if (report) report({ UpdatePhase::Organizing });
 		GetChartsAndOrganize(tempdir);
 		return true;
 	}
