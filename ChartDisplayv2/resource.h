@@ -33,6 +33,7 @@
 #define IDC_LIST1                       1020
 #define IDC_CLASS                       1021
 #define IDC_TYPE                        1022
+#define IDC_CUSTOMAP                    1023
 #define IDC_STATIC                      -1
 
 // Next default values for new objects

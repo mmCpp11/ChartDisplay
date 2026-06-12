@@ -233,6 +233,11 @@ namespace charts {
 		bool useradded;
 		AirportRecord() :pid(-1), airspace_class('E'), artcc(ARTCC::Empty),has_charts(false),useradded(false) {}
 	};
+	//Minimal exported view of a real airport for the custom-charts dialog (AirportRecord is internal).
+	export struct AirportLookup {
+		ARTCC artcc;
+		char airspace_class;
+	};
 	//get this from the TPP xml file
 	export struct ChartRecord {
 		long pid;
@@ -295,6 +300,9 @@ namespace charts {
 		//returns empty vector if the charts could not be returned
 		std::vector<ChartRecord> GetAirportCharts(std::string airport_id);
 		std::vector<ChartType> GetAirportChartType(std::string airport_id);
+		//The real (NASR, non-user-added) airport for an FAA LID, or nullopt. The custom-charts dialog uses
+		//it to derive ARTCC/airspace class for a real airport, and to reject a "custom" LID that is real.
+		std::optional<AirportLookup> GetRealAirportByLID(std::string lid) const;
 		//pass in a value to set the autoupdate state, otherwise, returns the current autoupdate state. Returns nullopt for a set operation
 		std::optional<bool> AutoupdateState(std::optional<bool> set_autoupdate = std::nullopt);
 		//get any additional artcc-wide items passed in the xml file. Returns empty vector if nothing found

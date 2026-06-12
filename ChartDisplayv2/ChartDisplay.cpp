@@ -1017,6 +1017,8 @@ INT_PTR CustomChartProc(HWND hdlg, UINT msg, WPARAM wParam, LPARAM lParam) {
 		EnableWindow(GetDlgItem(hdlg, IDC_NAME), false);
 		EnableWindow(GetDlgItem(hdlg, IDC_PATH), false);
 		EnableWindow(GetDlgItem(hdlg, IDC_ADD), false);
+		CheckDlgButton(hdlg, IDC_CUSTOMAP, BST_UNCHECKED);
+		EnableWindow(GetDlgItem(hdlg, IDC_CUSTOMAP), false);
 		autoenable_remove_button();
 		};
 	std::unordered_map<std::wstring, std::wstring> charttype_conv_cb;
@@ -1191,6 +1193,8 @@ INT_PTR CustomChartProc(HWND hdlg, UINT msg, WPARAM wParam, LPARAM lParam) {
 					EnableWindow(GetDlgItem(hdlg, IDC_TYPE), false);
 					EnableWindow(GetDlgItem(hdlg, IDC_CLASS), false);
 					EnableWindow(GetDlgItem(hdlg, IDC_NAME), false);
+					CheckDlgButton(hdlg, IDC_CUSTOMAP, BST_UNCHECKED);
+					EnableWindow(GetDlgItem(hdlg, IDC_CUSTOMAP), false);
 				}
 				else if (sel == L"ARTCC Item") {
 					EnableWindow(GetDlgItem(hdlg, IDC_BUTTONFILE), true);
@@ -1201,16 +1205,22 @@ INT_PTR CustomChartProc(HWND hdlg, UINT msg, WPARAM wParam, LPARAM lParam) {
 					EnableWindow(GetDlgItem(hdlg, IDC_TYPE), false);
 					EnableWindow(GetDlgItem(hdlg, IDC_CLASS), false);
 					EnableWindow(GetDlgItem(hdlg, IDC_NAME), true);
+					CheckDlgButton(hdlg, IDC_CUSTOMAP, BST_UNCHECKED);
+					EnableWindow(GetDlgItem(hdlg, IDC_CUSTOMAP), false);
 				}
 				else if (sel == L"Airport Item") {
 					EnableWindow(GetDlgItem(hdlg, IDC_BUTTONFILE), true);
 					EnableWindow(GetDlgItem(hdlg, IDC_ADD), true);
 					EnableWindow(GetDlgItem(hdlg, IDC_PATH), true);
 					EnableWindow(GetDlgItem(hdlg, IDC_AP), true);
-					EnableWindow(GetDlgItem(hdlg, IDC_ARTCC), true);
 					EnableWindow(GetDlgItem(hdlg, IDC_TYPE), true);
-					EnableWindow(GetDlgItem(hdlg, IDC_CLASS), true);
 					EnableWindow(GetDlgItem(hdlg, IDC_NAME), true);
+					EnableWindow(GetDlgItem(hdlg, IDC_CUSTOMAP), true);
+					//ARTCC + class are derived from the LID for a real airport; only a Custom Airport (a
+					//fictional one) supplies them, so they unlock only when that box is checked.
+					const bool custom = IsDlgButtonChecked(hdlg, IDC_CUSTOMAP) == BST_CHECKED;
+					EnableWindow(GetDlgItem(hdlg, IDC_ARTCC), custom);
+					EnableWindow(GetDlgItem(hdlg, IDC_CLASS), custom);
 				}
 			}
 			break;
@@ -1219,6 +1229,15 @@ INT_PTR CustomChartProc(HWND hdlg, UINT msg, WPARAM wParam, LPARAM lParam) {
 		{
 			auto lv_handle = GetDlgItem(hdlg, IDC_CLIST);
 			switch (LOWORD(wParam)) {
+			case IDC_CUSTOMAP:
+			{
+				//Toggle whether ARTCC/class are user-supplied. AUTOCHECKBOX has already flipped its state
+				//by the time BN_CLICKED arrives, so just read it.
+				const bool custom = IsDlgButtonChecked(hdlg, IDC_CUSTOMAP) == BST_CHECKED;
+				EnableWindow(GetDlgItem(hdlg, IDC_ARTCC), custom);
+				EnableWindow(GetDlgItem(hdlg, IDC_CLASS), custom);
+				break;
+			}
 			case IDC_BUTTONFILE:
 			{
 				//Open File Dialog and Place the text in the edit box
@@ -1262,42 +1281,73 @@ INT_PTR CustomChartProc(HWND hdlg, UINT msg, WPARAM wParam, LPARAM lParam) {
 				switch (index) {
 				case AIRPORT_ITEM:
 				{
-					item.pszText = crt_strs.at(0).data();
-					SendMessage(lv_handle, static_cast<UINT>(LVM_INSERTITEM), 0_wp, PtrToLP(&item));
 					std::wstring name = get_control_text(IDC_NAME);
-					std::wstring artccstr = get_cb_text(GetDlgItem(hdlg, IDC_ARTCC));
 					std::wstring airport = get_control_text(IDC_AP);
-					std::wstring ctype = charttype_conv_cb.at(get_cb_text(GetDlgItem(hdlg, IDC_TYPE)));
-					std::wstring clsstr = get_cb_text(GetDlgItem(hdlg, IDC_CLASS));
-					if (name.empty() || artccstr.empty() || airport.empty()) {
-						Win64Wrapper::CreateMessageBox(L"Airport, ARTCC, and Name required", L"AirportItem Error", hdlg, MessageBoxStyles::Ok,
+					std::wstring typesel = get_cb_text(GetDlgItem(hdlg, IDC_TYPE));
+					if (name.empty() || airport.empty() || typesel.empty()) {
+						Win64Wrapper::CreateMessageBox(L"Airport, Name, and Type are required.", L"AirportItem Error", hdlg, MessageBoxStyles::Ok,
 							MessageBoxStyles::DefaultButton1, MessageBoxStyles::IconError);
+						--lv_index;
 						return TRUE;
 					}
-					//get rid of ICAO
-					std::wregex icao_regex(LR"((K|P)([A-Za-z]{3}))");
-					std::wsmatch mtch;
-					if (std::regex_match(airport, mtch, icao_regex)) {
+					std::wstring ctype = charttype_conv_cb.at(typesel);
+					//Normalize the identifier: upper-case, then strip an ICAO prefix (K/P + 3 letters) to the FAA LID.
+					std::ranges::transform(airport, airport.begin(), [](wchar_t c) { return static_cast<wchar_t>(std::towupper(c)); });
+					if (std::wsmatch mtch; std::regex_match(airport, mtch, std::wregex(LR"((K|P)([A-Z]{3}))"))) {
 						airport = mtch[2].str();
 					}
-					item.iSubItem = 1;
-					item.pszText = name.data();
-					SendMessage(lv_handle, static_cast<UINT>(LVM_SETITEM), 0_wp, PtrToLP(&item));
-					item.iSubItem = 2;
-					item.pszText = airport.data();
-					SendMessage(lv_handle, static_cast<UINT>(LVM_SETITEM), 0_wp, PtrToLP(&item));
-					item.iSubItem = 3;
-					item.pszText = artccstr.data();
-					SendMessage(lv_handle, static_cast<UINT>(LVM_SETITEM), 0_wp, PtrToLP(&item));
-					item.iSubItem = 4;
-					item.pszText = ctype.data();
-					SendMessage(lv_handle, static_cast<UINT>(LVM_SETITEM), 0_wp, PtrToLP(&item));
-					item.iSubItem = 5;
-					item.pszText = clsstr.data();
-					SendMessage(lv_handle, static_cast<UINT>(LVM_SETITEM), 0_wp, PtrToLP(&item));
-					item.iSubItem = 6;
-					item.pszText = pth.data();
-					SendMessage(lv_handle, static_cast<UINT>(LVM_SETITEM), 0_wp, PtrToLP(&item));
+					//Real airport -> derive ARTCC/class from NASR. Custom (fictional) -> take them from the form,
+					//but only if the LID is NOT a real airport (so fictional ids can't collide with real ones).
+					const bool custom = IsDlgButtonChecked(hdlg, IDC_CUSTOMAP) == BST_CHECKED;
+					auto real = chartaccessor->GetRealAirportByLID(Win64Wrapper::convert_string(airport));
+					std::wstring artccstr, clsstr;
+					if (custom) {
+						if (real) {
+							Win64Wrapper::CreateMessageBox(std::format(L"{} is a real FAA airport. Uncheck Custom Airport to add a chart for it.", airport),
+								L"AirportItem Error", hdlg, MessageBoxStyles::Ok, MessageBoxStyles::DefaultButton1, MessageBoxStyles::IconError);
+							--lv_index;
+							return TRUE;
+						}
+						artccstr = get_cb_text(GetDlgItem(hdlg, IDC_ARTCC));
+						clsstr = get_cb_text(GetDlgItem(hdlg, IDC_CLASS));
+						if (artccstr.empty() || clsstr.empty()) {
+							Win64Wrapper::CreateMessageBox(L"ARTCC and Class are required for a custom airport.", L"AirportItem Error", hdlg,
+								MessageBoxStyles::Ok, MessageBoxStyles::DefaultButton1, MessageBoxStyles::IconError);
+							--lv_index;
+							return TRUE;
+						}
+					}
+					else {
+						if (!real) {
+							Win64Wrapper::CreateMessageBox(std::format(L"{} is not a known FAA airport. Check Custom Airport to add a fictional one.", airport),
+								L"AirportItem Error", hdlg, MessageBoxStyles::Ok, MessageBoxStyles::DefaultButton1, MessageBoxStyles::IconError);
+							--lv_index;
+							return TRUE;
+						}
+						artccstr = Win64Wrapper::convert_string(charts::artcc_names_map.at(real->artcc));
+						const char cls = real->airspace_class;
+						clsstr = (cls == 'B') ? L"B" : (cls == 'C') ? L"C" : (cls == 'D') ? L"D" : L"E/G";
+					}
+					//Everything validated -> commit the row. Insert at the actual end of the list and use the
+					//index LVM_INSERTITEM returns for the subitems: lv_index can drift (the empty-path check, or
+					//a prior validation bail, increments it without inserting), so reusing the stale item.iItem
+					//would target a nonexistent row and leave every subitem blank.
+					item.iItem = static_cast<int>(SendMessage(lv_handle, static_cast<UINT>(LVM_GETITEMCOUNT), 0_wp, 0_lp));
+					item.iSubItem = 0;
+					item.pszText = crt_strs.at(0).data();
+					const auto row = static_cast<int>(SendMessage(lv_handle, static_cast<UINT>(LVM_INSERTITEM), 0_wp, PtrToLP(&item)));
+					auto set_sub = [&](int sub, std::wstring& text) {
+						item.iItem = row;
+						item.iSubItem = sub;
+						item.pszText = text.data();
+						SendMessage(lv_handle, static_cast<UINT>(LVM_SETITEM), 0_wp, PtrToLP(&item));
+					};
+					set_sub(1, name);
+					set_sub(2, airport);
+					set_sub(3, artccstr);
+					set_sub(4, ctype);
+					set_sub(5, clsstr);
+					set_sub(6, pth);
 					autoenable_remove_button();
 					break;
 				}
@@ -1370,9 +1420,11 @@ INT_PTR CustomChartProc(HWND hdlg, UINT msg, WPARAM wParam, LPARAM lParam) {
 					lvi.iSubItem = subindex;
 					lvi.pszText = buf.data();
 					auto retval = SendMessage(lv_handle, static_cast<UINT>(LVM_GETITEMTEXT), lvi.iItem, PtrToLP(&lvi));
-					if (lvi.pszText != buf.data()) {
-						buf.assign(lvi.pszText);
-					}
+					//LVM_GETITEMTEXT copies the text into buf and returns its actual length; trim to that. The
+					//old code only trimmed when the listview redirected pszText (it doesn't here), so buf stayed
+					//padded to lv_item_max_length, every cell compared unequal to crt_strs, and Load captured
+					//nothing -> empty set -> the empty-overwrite guard fires.
+					buf.resize(retval > 0 ? static_cast<size_t>(retval) : 0);
 					return Win64Wrapper::convert_string(buf);
 					};
 				std::vector<charts::ManualXMLTag> xmlvec;

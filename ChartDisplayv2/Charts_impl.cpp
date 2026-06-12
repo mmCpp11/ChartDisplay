@@ -1186,6 +1186,16 @@ namespace charts {
 		auto db = GetDatabaseHandle();
 		return db.select(&ChartRecord::procedure_type, sql::where(sql::is_equal(&ChartRecord::airport_id, airport_id)));
 	}
+	std::optional<AirportLookup> FAAChartProcessor::GetRealAirportByLID(std::string lid) const {
+		auto db = GetDatabaseHandle();
+		//useradded == false restricts the match to real NASR airports, never fictional user-added ones.
+		auto recs = db.get_all<AirportRecord>(sql::where(
+			sql::is_equal(&AirportRecord::airport_id, lid) && sql::is_equal(&AirportRecord::useradded, false)));
+		if (recs.empty()) {
+			return std::nullopt;
+		}
+		return AirportLookup{ recs.front().artcc, recs.front().airspace_class };
+	}
 	void FAAChartProcessor::CleanCharts(const std::filesystem::path& tempdir, bool keep_temp) {
 		//first clean up organized charts
 		if (fs::exists(chartdir)) {
@@ -1370,6 +1380,32 @@ namespace charts {
 	}
 
 	void FAAChartProcessor::WriteManualCharts(const std::vector<ManualXMLTag>& records) {
+		using Win64Wrapper::MessageBoxStyles;
+		//Guard against a catastrophic overwrite: writing an EMPTY set over a populated config. This happens
+		//when every custom chart's source file is momentarily unreachable (e.g. an offline/renamed drive) so
+		//ParseManualCharts drops them all, the dialog looks empty, and Load would then erase everything.
+		//Deleting a single chart still writes the remaining N-1, so this only trips on a true wipe.
+		if (records.empty() && fs::exists(manchartxml)) {
+			pugi::xml_document existing;
+			if (existing.load_file(manchartxml.string().c_str())) {
+				auto root = existing.child("custom_charts");
+				if (root.child("chart") || root.child("artccrecord") || root.child("cwt")) {
+					auto resp = Win64Wrapper::CreateMessageBox(
+						L"This will remove ALL saved custom charts (the list is currently empty). If your chart "
+						L"files are just on an unavailable drive, cancel, reconnect it, and reopen this window.\n\nProceed?",
+						L"Custom Charts", nullptr, MessageBoxStyles::YesNo, MessageBoxStyles::IconWarning, MessageBoxStyles::DefaultButton2);
+					if (resp != Win64Wrapper::MessageBoxResponse::Yes) {
+						return;
+					}
+				}
+			}
+		}
+		//One-level backup before overwriting, so an unexpected loss is always recoverable.
+		if (fs::exists(manchartxml)) {
+			std::error_code ec;
+			fs::copy_file(manchartxml, manchartxml.parent_path() / "custom_charts.bak.xml",
+				fs::copy_options::overwrite_existing, ec);
+		}
 		pugi::xml_document doc;
 		constexpr std::array<const char*, 7> nodes = { "custom_charts","chart","title","path","type","artccrecord","cwt" };
 		constexpr std::array<const char*, 3> attributes = { "airport","artcc","class" };
