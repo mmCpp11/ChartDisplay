@@ -107,7 +107,6 @@ enum class ControlIDList : WORD {
 	ComboSTAR,
 	ComboIAP,
 	ComboManual,
-	StaticAIRAC,
 	DynamicButtonStart=500,
 	Dummy=1000
 };
@@ -323,12 +322,21 @@ void HandleAppUpdateResult(HWND hwnd, const AppUpdateInfo& info) {
 	}
 }
 
-//Help->About: a version-aware box, kept in code so the version stays single-sourced from version.h.
+//Help->About: a version-aware box, kept in code so the version stays single-sourced from version.h. Also
+//reports the installed chart AIRAC cycle (was previously a static label on the main window).
 void ShowAboutBox(HWND hwnd) {
 	using Win64Wrapper::MessageBoxStyles;
+	std::wstring airac = L"Chart AIRAC Cycle: ";
+	if (chartaccessor) {
+		charts::AIRACInfo ai = chartaccessor->GetLastChartUpdate();
+		airac += ai ? std::to_wstring(ai.cycle_id) : L"N/A";
+	}
+	else {
+		airac += L"N/A";
+	}
 	Win64Wrapper::CreateMessageBox(
-		std::format(L"FAA Chart Display\nVersion {}.{}.{}\n\nCopyright (C) 2025 Matthew Moran\nLicensed under the GNU GPL v3.",
-			CD_VER_MAJOR, CD_VER_MINOR, CD_VER_PATCH),
+		std::format(L"FAA Chart Display\nVersion {}.{}.{}\n\n{}\n\nCopyright (C) 2025 Matthew Moran\nLicensed under the GNU GPL v3.",
+			CD_VER_MAJOR, CD_VER_MINOR, CD_VER_PATCH, airac),
 		L"About ChartDisplay", hwnd, MessageBoxStyles::Ok, MessageBoxStyles::DefaultButton1, MessageBoxStyles::IconInformation);
 }
 
@@ -437,32 +445,6 @@ LRESULT ExtraWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 			L"Error Opening Chart", hwnd, Win64Wrapper::MessageBoxStyles::Ok,
 			Win64Wrapper::MessageBoxStyles::DefaultButton1, Win64Wrapper::MessageBoxStyles::IconError);
 		};
-	//Draw Chart AIRAC Cycle label. During WM_CREATE the control_list item has not been created yet, so allow explict pass in
-	auto DrawAIRACLabel = [&hwnd](std::optional<std::reference_wrapper<CCContainer>> ctrls=std::nullopt,bool wmcreate = false){
-		Win64Wrapper::Window& winclass = Win64Wrapper::GetWindowFromHWND(hwnd);
-		CCContainer& winctrls = ctrls ? ctrls->get() : Sec(control_list.at(hwnd), Section::TopARTCC);
-		if (!wmcreate) {
-			auto sairac_ctl = FindControl(winctrls, ControlIDList::StaticAIRAC);
-			if (sairac_ctl == winctrls.end())
-				return;
-			winctrls.erase(sairac_ctl);
-		}
-		std::wstring airac_text = L"Chart AIRAC Cycle: ";
-		charts::AIRACInfo ai = chartaccessor->GetLastChartUpdate();
-		if (ai) {
-			airac_text += std::to_wstring(ai.cycle_id);
-		}
-		else {
-			airac_text += L"N/A";
-		}
-		auto sartcc_ctl = FindControl(winctrls, ControlIDList::StaticARTCC);
-		if (sartcc_ctl == winctrls.end())
-			return;
-		auto p_sartcc = sartcc_ctl->GetControlParams();
-		CommonControlParams p_sairac{ ControlNames::Static,airac_text.c_str(),std::to_underlying(ControlIDList::StaticAIRAC),
-		p_sartcc.posX, p_sartcc.posY + 25,WindowSize(200,20) };
-		winctrls.emplace_back(p_sairac, winclass, CommonControl::CommonStyles::StaticLeft);
-	};
 	switch (msg) {
 	case WM_CREATE:
 	{
@@ -499,8 +481,6 @@ LRESULT ExtraWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 		CommonControlParams p_rmanual{ ControlNames::Button,L"Custom Charts",std::to_underlying(ControlIDList::ButtonCustom),
 		btncol_x,lloffsety,WindowSize(140,30) };
 		winctrls.emplace_back(p_rmanual, winclass, CommonControl::CommonStyles::PushButton);
-		//AIRAC static control label
-		DrawAIRACLabel(winctrls, true);
 		//populate the ARTCC combo box
 		std::vector<std::string> artcclist = charts::artcc_names_map | std::views::values | std::ranges::to<std::vector>();
 		//remove ZAE (add it back later as other)
@@ -761,7 +741,6 @@ LRESULT ExtraWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 		EnableWindow(hwnd, TRUE);   //re-enable the main window before tearing down the dialog
 		progdlg.reset();            //destroy the progress dialog
 		update_worker = {};         //join the (already finished) worker
-		DrawAIRACLabel();           //chart cycle may have changed; refresh the label
 		if (ok) {
 			Win64Wrapper::CreateMessageBox(std::format(L"{} complete.", update_done_label), update_done_label, hwnd);
 		}
