@@ -23,13 +23,7 @@
 name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
 processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
-//Phase 1 of the control-system redesign removed the WM_APP custom messages that used to shuttle
-//button counts/colors/the artcc boundary index into window-proc statics. That per-window state now
-//lives in WindowControls (below) and is written directly via control_list, so no messaging is needed.
-
-//Cross-thread UI signals for the chart-update worker. This IS the legitimate use of WM_APP + PostMessage:
-//marshaling from the worker thread to the UI thread (unlike the removed messages, which duplicated state
-//already held on the UI thread).
+//Cross-thread UI signals for the chart-update worker.
 #define WM_APP_UPDATE_PROGRESS (WM_APP + 0x0010)  //-> progress dialog: refresh status text from update_status_text
 #define WM_APP_UPDATE_DONE     (WM_APP + 0x0011)  //-> main window: wParam != 0 means success
 
@@ -71,8 +65,7 @@ inline CCContainer& Sec(WindowControls& wc, Section s) noexcept {
 }
 using CommonControlMap = std::unordered_map<HWND, WindowControls>;
 CommonControlMap control_list;
-//The custom-charts dialog now uses the ModelessDiagBox wrapper too (it predated the wrapper and used a
-//raw CreateDialogW). Engaged while the dialog is open; its window is torn down in CustomChartProc's WM_CLOSE.
+//The custom-charts dialog now uses the ModelessDiagBox wrapper. Engaged while the dialog is open; its window is torn down in CustomChartProc's WM_CLOSE.
 std::optional<Win64Wrapper::ModelessDiagBox> custdlg;
 
 //Chart-update worker + its progress dialog. The worker runs UpdateCharts on its own thread; status text
@@ -272,8 +265,6 @@ int wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int
 		return 1;
 	}
 
-	//Kick off the initial/auto chart update now that a window exists to host the progress dialog and a
-	//message loop is about to run (the constructor no longer downloads; see ChartUpdateNeeded()).
 	if (auto need = chart.ChartUpdateNeeded(); need != charts::UpdateNeed::None) {
 		StartChartUpdate(win(), false, need == charts::UpdateNeed::Initial);
 	}
@@ -291,8 +282,6 @@ int wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int
 	}
 	return 0;
 }
-//handle specific messages first, then run DefWindowProc on specific messages (with defwinproc = true).
-//If DefWindowProc inhibited return 0 to continue message processing
 LRESULT ExtraWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
 	using Win64Wrapper::CommonControl;
@@ -309,11 +298,6 @@ LRESULT ExtraWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 		Sec(wc, Section::ChartControls).clear();
 		};
 	auto OpenFileDefault = [hwnd](const std::filesystem::path& pth) {
-		//Open the file with its default handler through the shell, exactly like double-clicking it in
-		//Explorer. Unlike AssocQueryString(ASSOCSTR_EXECUTABLE) + CreateProcess, this works for UWP/Store
-		//apps (e.g. Photos) and protocol handlers, which have no plain exe to hand a path to. If nothing is
-		//associated, fall back to the shell "Open with" picker so the user can choose (and optionally set)
-		//an app -- so a default no longer has to be configured up front.
 		const std::wstring file = pth.native();
 		SHELLEXECUTEINFOW sei{ .cbSize = sizeof(SHELLEXECUTEINFOW) };
 		sei.fMask = SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI; //suppress the shell's own error UI; we handle it
@@ -1486,9 +1470,7 @@ INT_PTR CustomChartProc(HWND hdlg, UINT msg, WPARAM wParam, LPARAM lParam) {
 		break;
 	}
 	case WM_CLOSE:
-		//Destroy just the window here, not custdlg itself: resetting the owning optional from inside its own
-		//dialog callback would destroy the std::function mid-invocation (delete-this hazard). The optional is
-		//replaced on the next open via emplace.
+		//Destroy just the window here, not custdlg itself:
 		DestroyWindow(hdlg);
 		break;
 	default:
