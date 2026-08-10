@@ -57,10 +57,11 @@ namespace Net {
     export using DownloadProgress = std::function<bool(unsigned long long, unsigned long long)>;
 
     namespace {
-        //Shared GET core. If dest has a value the body is streamed to that file. If range_probe is true only
-        //the first byte is requested (availability check) and nothing is written.
+        //Shared GET core. If dest has a value the body is streamed to that file; else if body_sink is non-null
+        //the body is accumulated in memory there. If range_probe is true only the first byte is requested
+        //(availability check) and nothing is written.
         DownloadResult HttpGet(const std::wstring& url, const std::optional<std::filesystem::path>& dest,
-            bool range_probe, const DownloadProgress& progress) {
+            std::string* body_sink, bool range_probe, const DownloadProgress& progress) {
             DownloadResult result;
             //break the URL into host + path
             URL_COMPONENTS uc{};
@@ -135,8 +136,13 @@ namespace Net {
                     result.transport_ok = false; result.error = L"WinHttpReadData failed"; return result;
                 }
                 if (read == 0) break;
-                out.write(buffer.data(), read);
-                if (!out) { result.transport_ok = false; result.error = L"Write to output file failed"; return result; }
+                if (dest) {
+                    out.write(buffer.data(), read);
+                    if (!out) { result.transport_ok = false; result.error = L"Write to output file failed"; return result; }
+                }
+                else if (body_sink) {
+                    body_sink->append(buffer.data(), read);
+                }
                 received += read;
                 if (progress && !progress(received, total)) {
                     result.transport_ok = false; result.error = L"Download canceled"; return result;
@@ -149,11 +155,18 @@ namespace Net {
     //Download url to dest, streaming the body to disk. Optional progress callback (return false to cancel).
     export DownloadResult HttpDownloadToFile(const std::wstring& url, const std::filesystem::path& dest,
         const DownloadProgress& progress = {}) {
-        return HttpGet(url, dest, false, progress);
+        return HttpGet(url, dest, nullptr, false, progress);
+    }
+
+    //GET url and return the response body in memory (out_body). For small responses (e.g. a JSON API reply),
+    //not multi-GB downloads. Optional progress callback (return false to cancel).
+    export DownloadResult HttpGetToString(const std::wstring& url, std::string& out_body,
+        const DownloadProgress& progress = {}) {
+        return HttpGet(url, std::nullopt, &out_body, false, progress);
     }
 
     //Probe url with a single-byte range request (no file written). Inspect status_code for availability.
     export DownloadResult HttpProbe(const std::wstring& url) {
-        return HttpGet(url, std::nullopt, true, {});
+        return HttpGet(url, std::nullopt, nullptr, true, {});
     }
 }

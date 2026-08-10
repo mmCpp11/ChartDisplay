@@ -9,6 +9,12 @@
 #define IDD_ABOUTBOX                    103
 #define IDM_ABOUT                       104
 #define IDM_EXIT                        105
+// Menu command IDs live in the 40000+ command range so they can't collide with control IDs (>=201),
+// icon/dialog resource IDs, or the dynamic airport buttons (>=500).
+#define IDM_CHECKUPDATE                 40001
+#define IDM_FORCEUPDATE                 40002
+#define IDM_RELOAD                      40003
+#define IDM_AUTOUPDATE                  40004
 #define IDI_CHARTDISPLAY                107
 #define IDI_SMALL                       108
 #define IDC_CHARTDISPLAY                109

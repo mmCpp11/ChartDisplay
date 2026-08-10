@@ -6,7 +6,7 @@
 
 // Single source of truth for the program version. Used by the title bar (ChartDisplay.cpp) and the
 // VERSIONINFO resource (ChartDisplay.rc). Bump these when releasing.
-#define CD_VER_MAJOR 2
+#define CD_VER_MAJOR 3
 #define CD_VER_MINOR 0
 #define CD_VER_PATCH 0
 #define CD_VER_BUILD 0

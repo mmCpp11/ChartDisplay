@@ -26,10 +26,13 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 //Cross-thread UI signals for the chart-update worker.
 #define WM_APP_UPDATE_PROGRESS (WM_APP + 0x0010)  //-> progress dialog: refresh status text from update_status_text
 #define WM_APP_UPDATE_DONE     (WM_APP + 0x0011)  //-> main window: wParam != 0 means success
+//Posted by the app-update-check worker when it finishes; lParam is a heap-owned AppUpdateInfo* to delete.
+#define WM_APP_UPDATECHECK_DONE (WM_APP + 0x0012)
 
 import std;
 import BasicWindowsWrapperModule;
 import Charts;
+import Downloader;
 
 //Fixes for standard constructs not in intellisense
 #ifdef __INTELLISENSE__
@@ -83,19 +86,17 @@ bool update_cancellable = true;   //false for a reload (the organize step can't 
 void StartChartUpdate(HWND main_window, bool no_download, bool force);
 INT_PTR ProgressDlgProc(HWND, UINT, WPARAM, LPARAM);
 enum class ControlIDList : WORD {
-	StaticARTCC = 101,
+	StaticARTCC = 201,
 	StaticBC,
 	ComboARTCC,
-	ButtonForceUpdate,
-	ButtonReload,
 	ButtonCustom,
 	ButtonCWT,
-	CheckBoxAutoupdate,
 	StaticD,
 	StaticET,
 	StaticE,
 	ComboUntowered,
 	ComboManualARTCC,
+	StaticAirportName,
 	StaticAirportsList,
 	StaticSTAR,
 	StaticSID,
@@ -222,6 +223,115 @@ void StartChartUpdate(HWND main_window, bool no_download, bool force) {
 	});
 }
 
+// ---- App self-update check: query GitHub Releases, notify on a newer version, open the download page ----
+
+//Result of one update check, handed from the worker thread to the UI thread via WM_APP_UPDATECHECK_DONE.
+struct AppUpdateInfo {
+	bool checked_ok = false;        //network fetch + version parse both succeeded
+	bool update_available = false;  //a newer release than this build exists
+	std::wstring latest;            //latest version, e.g. L"2.1.0" (only meaningful when checked_ok)
+	bool manual = false;            //true if the user asked (Help->Check for Updates); false for the silent startup check
+};
+
+namespace {
+	constexpr wchar_t kLatestReleaseApi[] = L"https://api.github.com/repos/mmCpp11/ChartDisplay/releases/latest";
+	constexpr wchar_t kReleasesPage[] = L"https://github.com/mmCpp11/ChartDisplay/releases/latest";
+
+	//Pull the "tag_name" value out of the GitHub release JSON without a full JSON parser: the field is a
+	//simple "tag_name":"vX.Y.Z" pair, so find the key and read the next quoted token.
+	std::optional<std::string> ExtractTagName(const std::string& json) {
+		auto key = json.find("\"tag_name\"");
+		if (key == std::string::npos) return std::nullopt;
+		auto colon = json.find(':', key + 10);
+		if (colon == std::string::npos) return std::nullopt;
+		auto q1 = json.find('"', colon);
+		if (q1 == std::string::npos) return std::nullopt;
+		auto q2 = json.find('"', q1 + 1);
+		if (q2 == std::string::npos) return std::nullopt;
+		return json.substr(q1 + 1, q2 - (q1 + 1));
+	}
+
+	//Parse "vX.Y.Z" (or "X.Y.Z", with missing components defaulting to 0) into {major, minor, patch}.
+	std::optional<std::array<int, 3>> ParseVersion(std::string_view tag) {
+		if (!tag.empty() && (tag.front() == 'v' || tag.front() == 'V')) tag.remove_prefix(1);
+		std::array<int, 3> v{ 0, 0, 0 };
+		std::size_t part = 0, i = 0;
+		while (part < v.size()) {
+			std::size_t dot = tag.find('.', i);
+			std::string_view seg = tag.substr(i, dot == std::string_view::npos ? std::string_view::npos : dot - i);
+			int value = 0;
+			auto [ptr, ec] = std::from_chars(seg.data(), seg.data() + seg.size(), value);
+			if (ec != std::errc{}) return std::nullopt;   //non-numeric segment -> not a version we understand
+			v[part++] = value;
+			if (dot == std::string_view::npos) break;
+			i = dot + 1;
+		}
+		return v;
+	}
+}
+
+std::jthread appupdate_worker;   //one app-update check at a time; reset in WM_APP_UPDATECHECK_DONE
+
+//Kick off a GitHub release check on a worker thread. manual=true is a user request (report every outcome);
+//manual=false is the silent startup check (only speaks up when a newer version exists). The result is
+//marshaled back to main_window via WM_APP_UPDATECHECK_DONE with a heap-owned AppUpdateInfo* in lParam.
+void StartAppUpdateCheck(HWND main_window, bool manual) {
+	if (appupdate_worker.joinable()) return;   //a check is already running
+	appupdate_worker = std::jthread([main_window, manual] {
+		auto info = std::make_unique<AppUpdateInfo>();
+		info->manual = manual;
+		std::string body;
+		if (Net::HttpGetToString(kLatestReleaseApi, body)) {
+			if (auto tag = ExtractTagName(body)) {
+				if (auto remote = ParseVersion(*tag)) {
+					info->checked_ok = true;
+					const std::array<int, 3> local{ CD_VER_MAJOR, CD_VER_MINOR, CD_VER_PATCH };
+					info->update_available = (*remote > local);
+					info->latest = std::format(L"{}.{}.{}", (*remote)[0], (*remote)[1], (*remote)[2]);
+				}
+			}
+		}
+		PostMessage(main_window, WM_APP_UPDATECHECK_DONE, 0, reinterpret_cast<LPARAM>(info.release()));
+	});
+}
+
+//UI-thread handler for a finished update check (called from WM_APP_UPDATECHECK_DONE).
+void HandleAppUpdateResult(HWND hwnd, const AppUpdateInfo& info) {
+	using Win64Wrapper::MessageBoxStyles;
+	if (info.update_available) {
+		const auto current = std::format(L"{}.{}.{}", CD_VER_MAJOR, CD_VER_MINOR, CD_VER_PATCH);
+		auto resp = Win64Wrapper::CreateMessageBox(
+			std::format(L"A new version of ChartDisplay is available.\n\nInstalled: {}\nLatest: {}\n\nOpen the download page now?",
+				current, info.latest),
+			L"Update Available", hwnd,
+			MessageBoxStyles::YesNo, MessageBoxStyles::DefaultButton1, MessageBoxStyles::IconInformation);
+		if (resp == Win64Wrapper::MessageBoxResponse::Yes) {
+			ShellExecuteW(hwnd, L"open", kReleasesPage, nullptr, nullptr, SW_SHOWNORMAL);
+		}
+		return;
+	}
+	//No newer version: only bother the user when they explicitly asked. The startup check stays silent.
+	if (!info.manual) return;
+	if (info.checked_ok) {
+		Win64Wrapper::CreateMessageBox(L"You're running the latest version of ChartDisplay.", L"No Updates",
+			hwnd, MessageBoxStyles::Ok, MessageBoxStyles::DefaultButton1, MessageBoxStyles::IconInformation);
+	}
+	else {
+		Win64Wrapper::CreateMessageBox(
+			L"Could not check for updates. Please check your internet connection and try again.",
+			L"Update Check Failed", hwnd, MessageBoxStyles::Ok, MessageBoxStyles::DefaultButton1, MessageBoxStyles::IconWarning);
+	}
+}
+
+//Help->About: a version-aware box, kept in code so the version stays single-sourced from version.h.
+void ShowAboutBox(HWND hwnd) {
+	using Win64Wrapper::MessageBoxStyles;
+	Win64Wrapper::CreateMessageBox(
+		std::format(L"FAA Chart Display\nVersion {}.{}.{}\n\nCopyright (C) 2025 Matthew Moran\nLicensed under the GNU GPL v3.",
+			CD_VER_MAJOR, CD_VER_MINOR, CD_VER_PATCH),
+		L"About ChartDisplay", hwnd, MessageBoxStyles::Ok, MessageBoxStyles::DefaultButton1, MessageBoxStyles::IconInformation);
+}
+
 int wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nCmdShow) {
 	UNREFERENCED_PARAMETER(hPrevInstance);
 	UNREFERENCED_PARAMETER(nCmdShow);
@@ -247,7 +357,7 @@ int wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int
 	WNDCLASSEX wc = {};
 	wc.cbSize = sizeof(WNDCLASSEX);
 	wc.hInstance = hInstance;
-	wc.lpszClassName = L"MainWinClass";
+	wc.lpszClassName = L"ChartDisplayWinClass";
 	wc.style = CS_HREDRAW | CS_VREDRAW;
 	wc.hCursor = std::bit_cast<HCURSOR>(LoadImage(NULL, MAKEINTRESOURCE(IDC_ARROW), IMAGE_CURSOR, 0, 0, LR_DEFAULTSIZE | LR_SHARED));
 	if (!wc.hCursor) {
@@ -268,6 +378,9 @@ int wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int
 	if (auto need = chart.ChartUpdateNeeded(); need != charts::UpdateNeed::None) {
 		StartChartUpdate(win(), false, need == charts::UpdateNeed::Initial);
 	}
+
+	//Silent app-update check: notifies only if a newer release exists (result handled in WM_APP_UPDATECHECK_DONE).
+	StartAppUpdateCheck(win(), false);
 
 	MSG msg;
 	auto acceltable = LoadAccelerators(hInstance, MAKEINTRESOURCE(IDC_CHARTDISPLAY));
@@ -354,6 +467,23 @@ LRESULT ExtraWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	case WM_CREATE:
 	{
 		Win64Wrapper::Window& winclass = Win64Wrapper::GetWindowFromHWND(hwnd);
+		//Attach the main menu bar. Item IDs are the IDM_*
+		//commands routed in WM_COMMAND below.
+		if (HMENU menu = LoadMenu(GetModuleHandleW(nullptr), MAKEINTRESOURCE(IDC_CHARTDISPLAY))) {
+			SetMenu(hwnd, menu);
+			//Seed the "Auto-update Charts on Start" checkmark from the persisted setting. The getter throws
+			//when the control row is absent (fresh DB), so treat any failure as off.
+			bool autoupd = false;
+			try
+			{
+				autoupd = chartaccessor && chartaccessor->AutoupdateState().value_or(false);
+			}
+			catch (...)
+			{
+				autoupd = false;
+			}
+			CheckMenuItem(menu, IDM_AUTOUPDATE, MF_BYCOMMAND | (autoupd ? MF_CHECKED : MF_UNCHECKED));
+		}
 		//ARTCC static control label
 		int lloffsetx = 10, lloffsety = 10;
 		CCContainer winctrls;
@@ -364,24 +494,13 @@ LRESULT ExtraWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 		CommonControlParams p_artccbox{ ControlNames::ComboBox,L"Default Option",std::to_underlying(ControlIDList::ComboARTCC),
 			lloffsetx + p_sartcc.sz.width + 10, lloffsety,WindowSize(150,1000) };
 		winctrls.emplace_back(p_artccbox, winclass, CommonControl::CommonStyles::ComboBoxDDL);
-		//Force Update Button
-		CommonControlParams p_update{ ControlNames::Button,L"Force Chart Update",std::to_underlying(ControlIDList::ButtonForceUpdate),
-			p_artccbox.posX + p_artccbox.sz.width + 10,lloffsety,WindowSize(180,30) };
-		winctrls.emplace_back(p_update, winclass, CommonControl::CommonStyles::PushButton);
-		//Autoupdate box
-		CommonControlParams p_autoupdate{ ControlNames::Button,L"Autoupdate on start",std::to_underlying(ControlIDList::CheckBoxAutoupdate),
-		p_update.posX,p_update.posY + p_update.sz.height + 5,WindowSize(200,30) };
-		winctrls.emplace_back(p_autoupdate, winclass, CommonControl::CommonStyles::CheckBox);
+		int btncol_x = p_artccbox.posX + p_artccbox.sz.width + 10;
+		//Custom (user-added) charts button
+		CommonControlParams p_rmanual{ ControlNames::Button,L"Custom Charts",std::to_underlying(ControlIDList::ButtonCustom),
+		btncol_x,lloffsety,WindowSize(140,30) };
+		winctrls.emplace_back(p_rmanual, winclass, CommonControl::CommonStyles::PushButton);
 		//AIRAC static control label
 		DrawAIRACLabel(winctrls, true);
-		//ReloadCharts box
-		CommonControlParams p_reload{ ControlNames::Button,L"Reload Charts",std::to_underlying(ControlIDList::ButtonReload),
-		p_update.posX + p_update.sz.width + 5,p_update.posY,WindowSize(140,30) };
-		winctrls.emplace_back(p_reload, winclass, CommonControl::CommonStyles::PushButton);
-		//Reload User-Added Charts
-		CommonControlParams p_rmanual{ ControlNames::Button,L"Custom Charts",std::to_underlying(ControlIDList::ButtonCustom),
-		p_reload.posX + p_reload.sz.width + 5,p_reload.posY,WindowSize(140,30) };
-		winctrls.emplace_back(p_rmanual, winclass, CommonControl::CommonStyles::PushButton);
 		//populate the ARTCC combo box
 		std::vector<std::string> artcclist = charts::artcc_names_map | std::views::values | std::ranges::to<std::vector>();
 		//remove ZAE (add it back later as other)
@@ -424,12 +543,6 @@ LRESULT ExtraWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	case WM_DESTROY:
 	{
 		defwinproc = true;
-		if (IsDlgButtonChecked(hwnd, std::to_underlying(ControlIDList::CheckBoxAutoupdate))) {
-			chartaccessor->AutoupdateState(true);
-		}
-		else {
-			chartaccessor->AutoupdateState(false);
-		}
 		try {
 			//don't care about the vector there, just care if it throws or not
 			auto& ctrls=control_list.at(hwnd);
@@ -489,31 +602,48 @@ LRESULT ExtraWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	case WM_COMMAND:
 	{
 		auto ctl_id = LOWORD(wParam);
+		//Menu bar / accelerator commands carry no control notification and use IDM_* IDs, which never collide
+		//with control IDs (>=201). Handle them up front so both menu clicks and accelerators are covered.
+		switch (ctl_id) {
+		case IDM_EXIT:
+			DestroyWindow(hwnd);   //-> WM_DESTROY -> wrapper posts WM_QUIT
+			return 0;
+		case IDM_ABOUT:
+			ShowAboutBox(hwnd);
+			return 0;
+		case IDM_FORCEUPDATE:
+			if (chartaccessor) {
+				auto check = Win64Wrapper::CreateMessageBox(L"Confirm Chart Upgrade?", L"Chart Upgrade", hwnd,
+					MessageBoxStyles::AppModal, MessageBoxStyles::IconWarning, MessageBoxStyles::DefaultButton2, MessageBoxStyles::YesNo);
+				//Assume No on any message-box failure, to avoid an accidental chart re-download.
+				if (check == Win64Wrapper::MessageBoxResponse::Yes) {
+					//Worker thread behind a progress dialog; completion lands in WM_APP_UPDATE_DONE.
+					StartChartUpdate(hwnd, false, true);
+				}
+			}
+			return 0;
+		case IDM_RELOAD:
+			//Reorganize the already-downloaded zips (no network); completion lands in WM_APP_UPDATE_DONE.
+			if (chartaccessor) StartChartUpdate(hwnd, true, false);
+			return 0;
+		case IDM_CHECKUPDATE:
+			StartAppUpdateCheck(hwnd, true);   //manual check: always report the result
+			return 0;
+		case IDM_AUTOUPDATE:
+			if (chartaccessor) {
+				//Toggle the checkable menu item and persist the new state immediately.
+				const bool nowon = !(GetMenuState(GetMenu(hwnd), IDM_AUTOUPDATE, MF_BYCOMMAND) & MF_CHECKED);
+				CheckMenuItem(GetMenu(hwnd), IDM_AUTOUPDATE, MF_BYCOMMAND | (nowon ? MF_CHECKED : MF_UNCHECKED));
+				chartaccessor->AutoupdateState(nowon);
+			}
+			return 0;
+		}
 		switch (HIWORD(wParam)) {
 		case BN_CLICKED:
 		{
 			auto& wc = control_list.at(hwnd);
-			if (ctl_id == std::to_underlying(ControlIDList::ButtonForceUpdate)) {
-				if (chartaccessor) {
-					auto check = Win64Wrapper::CreateMessageBox(L"Confirm Chart Upgrade?", L"Chart Upgrade", hwnd,
-						MessageBoxStyles::AppModal, MessageBoxStyles::IconWarning, MessageBoxStyles::DefaultButton2, MessageBoxStyles::YesNo);
-					//If anything goes wrong in the creation or display of the Message Box, assume a No to prevent accidental updating of charts.
-					if (check == Win64Wrapper::MessageBoxResponse::Yes) {
-						//Runs on a worker thread behind a progress dialog; completion lands in WM_APP_UPDATE_DONE.
-						StartChartUpdate(hwnd, false, true);
-					}
-				}
-			}
-			//reload button
-			else if (ctl_id == std::to_underlying(ControlIDList::ButtonReload)) {
-				if (chartaccessor) {
-					//Reorganize from the already-downloaded zips (no network) on a worker thread behind the
-					//marquee dialog; completion lands in WM_APP_UPDATE_DONE.
-					StartChartUpdate(hwnd, true, false);
-				}
-			}
 			//reload custom charts
-			else if (ctl_id == std::to_underlying(ControlIDList::ButtonCustom)) {
+			if (ctl_id == std::to_underlying(ControlIDList::ButtonCustom)) {
 				//emplace replaces any previous instance (its window, if still open, is torn down by the dtor).
 				custdlg.emplace(prog_hinst, IDD_CUSTCHART, &CustomChartProc, hwnd);
 				custdlg->Display();
@@ -527,7 +657,7 @@ LRESULT ExtraWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 			}
 			//handle airport buttons
 			//Dynamic airport buttons are the only controls with id >= DynamicButtonStart (fixed controls are
-			//all <= 124), so the lower bound alone identifies them; a stale id just yields a null FindControl.
+			//in the low 200s), so the lower bound alone identifies them; a stale id just yields a null FindControl.
 			else if (ctl_id >= std::to_underlying(ControlIDList::DynamicButtonStart)) {
 				ResetARTCCControls(wc);
 				if (auto* cc = FindControl(wc, static_cast<WORD>(ctl_id))) {
@@ -642,6 +772,14 @@ LRESULT ExtraWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 		}
 		break;
 	}
+	//Posted by the app-update-check worker; lParam owns a heap AppUpdateInfo. Runs on the UI thread.
+	case WM_APP_UPDATECHECK_DONE:
+	{
+		std::unique_ptr<AppUpdateInfo> info(reinterpret_cast<AppUpdateInfo*>(lParam));
+		appupdate_worker = {};   //join the finished worker so a later check can start
+		if (info) HandleAppUpdateResult(hwnd, *info);
+		break;
+	}
 	default:
 		return DefWindowProc(hwnd, msg, wParam, lParam);
 	}
@@ -651,13 +789,6 @@ LRESULT ExtraWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	}
 	else return 0;
 }
-//StaticARTCC = 101,
-//StaticBC,
-//ComboARTCC,
-//ButtonForceUpdate,
-//ButtonReload,
-//ButtonCustom,
-//CheckBoxAutoupdate,
 void ClearWindowARTCC(const Win64Wrapper::Window& win) {
 	//Changing ARTCC keeps the persistent TopARTCC controls and drops the per-ARTCC airport-select controls
 	//along with any per-airport chart controls. Sectioning replaces the old keep-by-id list with two clears.
@@ -837,8 +968,14 @@ void OpenAirportCharts(std::wstring airport,HWND main_window,LONG label_end_pos)
 	auto& wc = control_list.at(main_window);
 	CCContainer& cwinctrls = Sec(wc, Section::ChartControls);
 	CommonControlParams p_sbc = {};
+	CommonControlParams p_custom = {};
+	//get the class b/c label for y positioning
 	if (auto* cc = FindControl(wc, ControlIDList::StaticBC)) {
 		p_sbc = cc->GetControlParams();
+	}
+	//get the custom charts button for airport label positioning
+	if (auto* cc = FindControl(wc, ControlIDList::ButtonCustom)) {
+		p_custom = cc->GetControlParams();
 	}
 	std::string airportstr = Win64Wrapper::convert_string(airport);
 	auto ctypes = chartaccessor->GetAirportChartType(airportstr);
@@ -850,6 +987,9 @@ void OpenAirportCharts(std::wstring airport,HWND main_window,LONG label_end_pos)
 
 	//Airport/Other Charts
 	int offx = label_end_pos + 10;
+	std::wstring static_airport = L"Airport: " + airport;
+	CommonControlParams p_acode{ControlNames::Static, static_airport.c_str(),std::to_underlying(ControlIDList::StaticAirportName), offx, p_custom.posY, WindowSize(100,20)};
+	cwinctrls.emplace_back(p_acode, win, CommonControl::CommonStyles::StaticLeft);
 	CommonControlParams p_sap{ ControlNames::Static,L"Airport Diagrams and Other Charts:",std::to_underlying(ControlIDList::StaticAirportsList),
 		offx,p_sbc.posY,WindowSize(400,20) };
 	cwinctrls.emplace_back(p_sap, win, CommonControl::CommonStyles::StaticLeft);
