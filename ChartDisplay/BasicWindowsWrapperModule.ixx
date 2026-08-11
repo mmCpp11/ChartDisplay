@@ -1933,6 +1933,8 @@ namespace Win64Wrapper {
             GroupBox = WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_GROUPBOX,
             Static = WS_VISIBLE | WS_CHILD | SS_CENTER,
             StaticLeft = WS_VISIBLE | WS_CHILD | SS_LEFT,
+            //SS_LEFT word-wraps: Use this for single-line labels whose text width isn't known up front.
+            StaticLeftNoWrap = WS_VISIBLE | WS_CHILD | SS_LEFTNOWORDWRAP,
             ListBox = WS_VISIBLE | WS_CHILD | LBS_STANDARD | LBS_HASSTRINGS,
             ComboBoxSimple = WS_VISIBLE | WS_CHILD | CBS_SIMPLE,
             ComboBoxDD = WS_VISIBLE | WS_CHILD | WS_VSCROLL | CBS_DROPDOWN,

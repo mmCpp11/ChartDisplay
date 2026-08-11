@@ -470,7 +470,7 @@ LRESULT ExtraWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 		int lloffsetx = 10, lloffsety = 10;
 		CCContainer winctrls;
 		CommonControlParams p_sartcc{ ControlNames::Static,L"ARTCC:",std::to_underlying(ControlIDList::StaticARTCC),lloffsetx,lloffsety + 5,WindowSize(70,20) };
-		winctrls.emplace_back(p_sartcc, winclass, CommonControl::CommonStyles::StaticLeft);
+		winctrls.emplace_back(p_sartcc, winclass, CommonControl::CommonStyles::StaticLeftNoWrap);
 
 		//ARTCC combo box
 		CommonControlParams p_artccbox{ ControlNames::ComboBox,L"Default Option",std::to_underlying(ControlIDList::ComboARTCC),
@@ -815,7 +815,7 @@ LONG PopulateWindowARTCC(const Win64Wrapper::Window& win, const charts::ARTCC ar
 	//Class B and C static control label
 	CommonControlParams p_sbc{ ControlNames::Static,L"Class B and C Airports:",std::to_underlying(ControlIDList::StaticBC),
 		borderparams.posX,borderparams.posY + 50,WindowSize(190,20) };
-	winctrls.emplace_back(p_sbc , win , CommonControl::CommonStyles::StaticLeft);
+	winctrls.emplace_back(p_sbc , win , CommonControl::CommonStyles::StaticLeftNoWrap);
 	// Dynamic Buttons
 	WindowSize btnsz{ 60,40 };
 	RECT winsz{};
@@ -864,7 +864,7 @@ LONG PopulateWindowARTCC(const Win64Wrapper::Window& win, const charts::ARTCC ar
 	//Class D static control label and buttons
 	CommonControlParams p_sd{ ControlNames::Static,L"Class D Airports:",std::to_underlying(ControlIDList::StaticD),
 		pos_x,pos_y,WindowSize{150,20} };
-	winctrls.emplace_back(p_sd, win, CommonControl::CommonStyles::StaticLeft);
+	winctrls.emplace_back(p_sd, win, CommonControl::CommonStyles::StaticLeftNoWrap);
 	pos_y += (p_sd.sz.height + 5);
 	perline_counter = 1;
 	std::ranges::for_each(alist.class_d_airports, std::bind(add_button, std::placeholders::_1, std::to_underlying(BtnColors::ClassD)));
@@ -876,7 +876,7 @@ LONG PopulateWindowARTCC(const Win64Wrapper::Window& win, const charts::ARTCC ar
 		}
 		CommonControlParams p_set{ ControlNames::Static,L"Class E/G Towered Airports:",std::to_underlying(ControlIDList::StaticET),
 			pos_x,pos_y,WindowSize{250,20} };
-		winctrls.emplace_back(p_set, win, CommonControl::CommonStyles::StaticLeft);
+		winctrls.emplace_back(p_set, win, CommonControl::CommonStyles::StaticLeftNoWrap);
 		pos_y += (p_set.sz.height + 5);
 		perline_counter = 1;
 		std::ranges::for_each(alist.other_towered, std::bind(add_button, std::placeholders::_1, std::to_underlying(BtnColors::ClassEGTowered)));
@@ -892,7 +892,7 @@ LONG PopulateWindowARTCC(const Win64Wrapper::Window& win, const charts::ARTCC ar
 	}
 	CommonControlParams p_se{ ControlNames::Static,L"Untowered Airports:",std::to_underlying(ControlIDList::StaticE),
 		pos_x,pos_y + 5,WindowSize(200,20) }; //the additional y is to align with the center of the combobox
-	winctrls.emplace_back(p_se, win, CommonControl::CommonStyles::StaticLeft);
+	winctrls.emplace_back(p_se, win, CommonControl::CommonStyles::StaticLeftNoWrap);
 	CommonControlParams p_ebox{ ControlNames::ComboBox,L"Default Option",std::to_underlying(ControlIDList::ComboUntowered),
 	pos_x + p_se.sz.width + 5, pos_y,WindowSize(150,1000) };
 	winctrls.emplace_back(p_ebox, win, CommonControl::CommonStyles::ComboBoxDDL);
@@ -914,7 +914,7 @@ LONG PopulateWindowARTCC(const Win64Wrapper::Window& win, const charts::ARTCC ar
 	if (!artcc_additions.empty()) {
 		CommonControlParams p_saa{ ControlNames::Static,L"User Added ARTCC Content:",std::to_underlying(ControlIDList::StaticManualARTCC),
 		pos_x,pos_y + 5,WindowSize(250,20) }; //the additional y is to align with the center of the combobox
-		winctrls.emplace_back(p_saa, win, CommonControl::CommonStyles::StaticLeft);
+		winctrls.emplace_back(p_saa, win, CommonControl::CommonStyles::StaticLeftNoWrap);
 		auto next_ctrl_pos = p_saa.posX + p_saa.sz.width + 5;
 		auto uac_width = 400;
 		if ((next_ctrl_pos + uac_width) > winsz.right) {
@@ -967,11 +967,12 @@ void OpenAirportCharts(std::wstring airport,HWND main_window,LONG label_end_pos)
 	//Airport/Other Charts
 	int offx = label_end_pos + 10;
 	std::wstring static_airport = L"Airport: " + airport;
-	CommonControlParams p_acode{ControlNames::Static, static_airport.c_str(),std::to_underlying(ControlIDList::StaticAirportName), offx, p_custom.posY, WindowSize(100,20)};
-	cwinctrls.emplace_back(p_acode, win, CommonControl::CommonStyles::StaticLeft);
+	CommonControlParams p_acode{ControlNames::Static, static_airport.c_str(),std::to_underlying(ControlIDList::StaticAirportName),
+		offx, p_custom.posY, WindowSize(200,20)};
+	cwinctrls.emplace_back(p_acode, win, CommonControl::CommonStyles::StaticLeftNoWrap);
 	CommonControlParams p_sap{ ControlNames::Static,L"Airport Diagrams and Other Charts:",std::to_underlying(ControlIDList::StaticAirportsList),
 		offx,p_sbc.posY,WindowSize(400,20) };
-	cwinctrls.emplace_back(p_sap, win, CommonControl::CommonStyles::StaticLeft);
+	cwinctrls.emplace_back(p_sap, win, CommonControl::CommonStyles::StaticLeftNoWrap);
 
 	CommonControlParams p_apbox{ ControlNames::ComboBox,L"Default Option",std::to_underlying(ControlIDList::ComboAp),
 		offx,p_sap.posY + p_sap.sz.height + 5,WindowSize(400,100) };
@@ -983,7 +984,7 @@ void OpenAirportCharts(std::wstring airport,HWND main_window,LONG label_end_pos)
 	if (std::ranges::find(ctypes, ChartType::STAR) != ctypes.end()) {
 		CommonControlParams p_sstar{ ControlNames::Static,L"Standard Terminal Arrival Routes:",std::to_underlying(ControlIDList::StaticSTAR),
 		offx,next_y_pos,WindowSize(400,20) };
-		cwinctrls.emplace_back(p_sstar, win, CommonControl::CommonStyles::StaticLeft);
+		cwinctrls.emplace_back(p_sstar, win, CommonControl::CommonStyles::StaticLeftNoWrap);
 
 		CommonControlParams p_starbox{ ControlNames::ComboBox,L"Default Option",std::to_underlying(ControlIDList::ComboSTAR),
 			offx,p_sstar.posY + p_sstar.sz.height + 5,WindowSize(400,100) };
@@ -994,7 +995,7 @@ void OpenAirportCharts(std::wstring airport,HWND main_window,LONG label_end_pos)
 	if (std::ranges::find(ctypes, ChartType::IAP) != ctypes.end()) {
 		CommonControlParams p_siap{ ControlNames::Static,L"Instrument Approach Procedures (IAP):",std::to_underlying(ControlIDList::StaticIAP),
 		offx,next_y_pos,WindowSize(400,20) };
-		cwinctrls.emplace_back(p_siap, win, CommonControl::CommonStyles::StaticLeft);
+		cwinctrls.emplace_back(p_siap, win, CommonControl::CommonStyles::StaticLeftNoWrap);
 
 		CommonControlParams p_iapbox{ ControlNames::ComboBox,L"Default Option",std::to_underlying(ControlIDList::ComboIAP),
 			offx,p_siap.posY + p_siap.sz.height + 5,WindowSize(400,100) };
@@ -1005,7 +1006,7 @@ void OpenAirportCharts(std::wstring airport,HWND main_window,LONG label_end_pos)
 	if ((std::ranges::find(ctypes, ChartType::SID) != ctypes.end()) || (std::ranges::find(ctypes, ChartType::ODP) != ctypes.end())) {
 		CommonControlParams p_ssid{ ControlNames::Static,L"Standard Instrument Departures/Charted ODPs:",std::to_underlying(ControlIDList::StaticSID),
 		offx,next_y_pos,WindowSize(400,20) };
-		cwinctrls.emplace_back(p_ssid, win, CommonControl::CommonStyles::StaticLeft);
+		cwinctrls.emplace_back(p_ssid, win, CommonControl::CommonStyles::StaticLeftNoWrap);
 
 		CommonControlParams p_sidbox{ ControlNames::ComboBox,L"Default Option",std::to_underlying(ControlIDList::ComboSID),
 			offx,p_ssid.posY + p_ssid.sz.height + 5,WindowSize(400,100) };
@@ -1015,7 +1016,7 @@ void OpenAirportCharts(std::wstring airport,HWND main_window,LONG label_end_pos)
 	if (std::ranges::find(ctypes, ChartType::MANUAL) != ctypes.end()) {
 		CommonControlParams p_sman{ ControlNames::Static,L"User Added Charts:",std::to_underlying(ControlIDList::StaticManualARTCC),
 				offx,next_y_pos,WindowSize(400,20) };
-		cwinctrls.emplace_back(p_sman, win, CommonControl::CommonStyles::StaticLeft);
+		cwinctrls.emplace_back(p_sman, win, CommonControl::CommonStyles::StaticLeftNoWrap);
 
 		CommonControlParams p_manbox{ ControlNames::ComboBox,L"Default Option",std::to_underlying(ControlIDList::ComboManual),
 		offx,p_sman.posY + p_sman.sz.height + 5,WindowSize(400,100) };
