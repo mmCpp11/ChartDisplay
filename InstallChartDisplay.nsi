@@ -1,8 +1,15 @@
 !include "MUI2.nsh"
+!include "FileFunc.nsh"
 
 Name "ChartDisplay"
 OutFile "InstallChartDisplay.exe"
 Unicode True
+
+; Everything this installer touches is per-user
+RequestExecutionLevel user
+
+; Set when launched with /UPDATE
+Var UpdateMode
 
 ; Version is single-sourced from version.h. This .nsi is compiled from
 ; the x64\Release staging dir, so version.h sits at ..\..\ChartDisplay\version.h relative to here.
@@ -22,13 +29,44 @@ VIAddVersionKey "LegalCopyright"  "Copyright (C) 2025 Matthew Moran"
 
 InstallDir "$LOCALAPPDATA\ChartDisplay\bin"
 
-; Refuse to install/uninstall while ChartDisplay is running: its exe would be locked and File/Delete would
-; fail mid-operation. FindWindow is done on the app's registered window class.
+; Refuse to install/uninstall while ChartDisplay is running
+
 Function .onInit
+  StrCpy $UpdateMode 0
+  ${GetParameters} $R0
+  ClearErrors
+  ${GetOptions} $R0 "/UPDATE" $R1
+  IfErrors not_update
+  StrCpy $UpdateMode 1
+  not_update:
+
+  ; Install over the existing copy rather than the default location
+  ReadRegStr $0 HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\$(^Name)" "InstallLocation"
+  StrCmp $0 "" 0 have_location
+  ; Installs predating InstallLocation still wrote UninstallString ($INSTDIR\uninstall.exe); derive it from
+  ; there so the first self-update lands on an existing custom directory instead of forking a second copy.
+  ReadRegStr $1 HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\$(^Name)" "UninstallString"
+  StrCmp $1 "" no_prior_install
+  ${GetParent} $1 $0
+  StrCmp $0 "" no_prior_install
+  have_location:
+  StrCpy $INSTDIR $0
+  no_prior_install:
+
+  StrCpy $R2 0   ; 500ms ticks spent waiting for the app to exit
   check_running:
   FindWindow $0 "ChartDisplayWinClass"
   StrCmp $0 0 done_running
+  StrCmp $UpdateMode 1 wait_for_exit
   MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "ChartDisplay appears to be running.$\n$\nClose it, then click Retry to continue installing (or Cancel to abort)." /SD IDCANCEL IDRETRY check_running
+  Abort
+  wait_for_exit:
+  IntCmp $R2 60 wait_timeout 0 wait_timeout   ; 60 ticks = 30s, then give up
+  Sleep 500
+  IntOp $R2 $R2 + 1
+  Goto check_running
+  wait_timeout:
+  ; The app never went away. Leave the installed copy untouched; the updater falls back to the download page.
   Abort
   done_running:
 FunctionEnd
@@ -86,18 +124,29 @@ CreateShortCut "$SMPROGRAMS\ChartDisplay\uninstall.lnk" "$INSTDIR\uninstall.exe"
 
 WriteRegStr   HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\$(^Name)" "DisplayName" "$(^Name)"
 WriteRegStr   HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\$(^Name)" "UninstallString" "$INSTDIR\uninstall.exe"
+WriteRegStr   HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\$(^Name)" "InstallLocation" "$INSTDIR"
 WriteRegStr   HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\$(^Name)" "DisplayVersion" "${PRODUCT_VERSION}"
 WriteRegStr   HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\$(^Name)" "DisplayIcon" "$INSTDIR\ChartDisplay.exe"
 WriteRegStr   HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\$(^Name)" "Publisher" "Matthew Moran"
 WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\$(^Name)" "NoModify" 1
 WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\$(^Name)" "NoRepair" 1
+
+StrCmp $UpdateMode 1 0 skip_relaunch
+Exec "$INSTDIR\ChartDisplay.exe"
+skip_relaunch:
 SectionEnd
 
 Section "Uninstall"
 
+; Ask before deleting charts
+MessageBox MB_YESNO|MB_ICONQUESTION "Also delete your downloaded charts and custom chart entries?$\n$\nThis frees several GB in $LOCALAPPDATA\ChartDisplay but means a full chart download on any future reinstall.$\n$\nChoose No to keep them." /SD IDNO IDYES remove_userdata
+Goto keep_userdata
+remove_userdata:
 RMDir /r "$LOCALAPPDATA\ChartDisplay\Charts"
 RMDir /r "$LOCALAPPDATA\ChartDisplay\download"
 Delete "$LOCALAPPDATA\ChartDisplay\chartdisplay.sqlite"
+Delete "$LOCALAPPDATA\ChartDisplay\custom_charts.xml"
+keep_userdata:
 
 Delete "$INSTDIR\ChartDisplay.exe"
 Delete "$INSTDIR\bz2.dll"
@@ -111,8 +160,12 @@ Delete "$INSTDIR\vcruntime140.dll"
 Delete "$INSTDIR\vcruntime140_1.dll"
 Delete "$INSTDIR\uninstall.exe"
 
+Delete "$INSTDIR\..\Third Party Licenses.txt"
+Delete "$INSTDIR\..\Readme.md"
+
+; Both non-recursive on purpose
 RMDir "$INSTDIR"
-RMDir /r "$INSTDIR\.."
+RMDir "$INSTDIR\.."
 
 RMDir /r "$SMPROGRAMS\ChartDisplay"
 
