@@ -15,6 +15,7 @@
 #define IDM_FORCEUPDATE                 40002
 #define IDM_RELOAD                      40003
 #define IDM_AUTOUPDATE                  40004
+#define IDM_AUTOAPPUPDATE               40005
 #define IDI_CHARTDISPLAY                107
 #define IDI_SMALL                       108
 #define IDC_CHARTDISPLAY                109

@@ -240,6 +240,33 @@ namespace {
 	constexpr wchar_t kLatestReleaseApi[] = L"https://api.github.com/repos/mmCpp11/ChartDisplay/releases/latest";
 	constexpr wchar_t kReleasesPage[] = L"https://github.com/mmCpp11/ChartDisplay/releases/latest";
 
+	//App-level preferences live in HKCU rather than in chartdisplay.sqlite
+	constexpr wchar_t kSettingsKey[] = L"Software\\ChartDisplay";
+	constexpr wchar_t kStartupCheckValue[] = L"CheckUpdatesAtStartup";
+
+	//Defaults to on
+	bool CheckUpdatesAtStartup() noexcept {
+		DWORD value = 0;
+		DWORD size = sizeof(value);
+		if (RegGetValueW(HKEY_CURRENT_USER, kSettingsKey, kStartupCheckValue, RRF_RT_REG_DWORD,
+			nullptr, &value, &size) != ERROR_SUCCESS) {
+			return true;
+		}
+		return value != 0;
+	}
+
+	void SetCheckUpdatesAtStartup(bool enabled) noexcept {
+		HKEY key = nullptr;
+		if (RegCreateKeyExW(HKEY_CURRENT_USER, kSettingsKey, 0, nullptr, REG_OPTION_NON_VOLATILE,
+			KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS) {
+			return;
+		}
+		const DWORD value = enabled ? 1 : 0;
+		RegSetValueExW(key, kStartupCheckValue, 0, REG_DWORD,
+			reinterpret_cast<const BYTE*>(&value), sizeof(value));
+		RegCloseKey(key);
+	}
+
 	//The update-signing public key, as a raw BCRYPT_RSAKEY_BLOB, read out of the rc file. Returns an empty
 	//span until IDR_UPDATE_PUBKEY is added to ChartDisplay.rc.
 	std::span<const UCHAR> UpdatePublicKeyBlob(HINSTANCE inst) noexcept {
@@ -547,7 +574,9 @@ int wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int
 	}
 
 	//Silent app-update check: notifies only if a newer release exists (result handled in WM_APP_UPDATECHECK_DONE).
-	StartAppUpdateCheck(win(), false);
+	if (CheckUpdatesAtStartup()) {
+		StartAppUpdateCheck(win(), false);
+	}
 
 	MSG msg;
 	auto acceltable = LoadAccelerators(hInstance, MAKEINTRESOURCE(IDC_CHARTDISPLAY));
@@ -647,6 +676,9 @@ LRESULT ExtraWindowProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 				autoupd = false;
 			}
 			CheckMenuItem(menu, IDM_AUTOUPDATE, MF_BYCOMMAND | (autoupd ? MF_CHECKED : MF_UNCHECKED));
+			//Program-update check: read from HKCU, defaulting to on.
+			CheckMenuItem(menu, IDM_AUTOAPPUPDATE,
+				MF_BYCOMMAND | (CheckUpdatesAtStartup() ? MF_CHECKED : MF_UNCHECKED));
 		}
 		//ARTCC static control label
 		int lloffsetx = 10, lloffsety = 10;
@@ -799,6 +831,14 @@ LRESULT ExtraWindowProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 				chartaccessor->AutoupdateState(nowon);
 			}
 			return 0;
+		case IDM_AUTOAPPUPDATE:
+		{
+			//No chartaccessor guard: this setting lives in the registry and stands on its own.
+			const bool nowon = !(GetMenuState(GetMenu(hwnd), IDM_AUTOAPPUPDATE, MF_BYCOMMAND) & MF_CHECKED);
+			CheckMenuItem(GetMenu(hwnd), IDM_AUTOAPPUPDATE, MF_BYCOMMAND | (nowon ? MF_CHECKED : MF_UNCHECKED));
+			SetCheckUpdatesAtStartup(nowon);
+			return 0;
+		}
 		}
 		switch (HIWORD(wParam)) {
 		case BN_CLICKED:

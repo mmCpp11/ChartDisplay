@@ -171,4 +171,7 @@ RMDir /r "$SMPROGRAMS\ChartDisplay"
 
 DeleteRegKey HKCU "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$(^Name)"
 
+; App preferences (Help->Check for Program Updates on Start)
+DeleteRegKey HKCU "Software\ChartDisplay"
+
 SectionEnd
