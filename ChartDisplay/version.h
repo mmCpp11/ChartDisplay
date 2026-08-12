@@ -1,4 +1,4 @@
-// Copyright (C) 2025 Matthew Moran
+// Copyright (C) 2025-2026 Matthew Moran
 //
 // This file is part of ChartDisplay. See the GPL-3.0 license headers in the other source files.
 

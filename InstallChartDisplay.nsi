@@ -25,7 +25,7 @@ VIAddVersionKey "ProductName"     "ChartDisplay"
 VIAddVersionKey "ProductVersion"  "${PRODUCT_VERSION}"
 VIAddVersionKey "FileVersion"     "${PRODUCT_VERSION}"
 VIAddVersionKey "FileDescription" "ChartDisplay installer"
-VIAddVersionKey "LegalCopyright"  "Copyright (C) 2025 Matthew Moran"
+VIAddVersionKey "LegalCopyright"  "Copyright (C) 2025-2026 Matthew Moran"
 
 InstallDir "$LOCALAPPDATA\ChartDisplay\bin"
 

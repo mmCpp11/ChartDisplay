@@ -1,4 +1,4 @@
-// Copyright (C) 2025 Matthew Moran
+// Copyright (C) 2025-2026 Matthew Moran
 //
 // This file is part of ChartDisplay.  This program is free
 // software; you can redistribute it and/or modify it under the
@@ -524,7 +524,7 @@ void ShowAboutBox(HWND hwnd) {
 		airac += L"N/A";
 	}
 	Win64Wrapper::CreateMessageBox(
-		std::format(L"FAA Chart Display\nVersion {}.{}.{}\n\n{}\n\nCopyright (C) 2025 Matthew Moran\nLicensed under the GNU GPL v3.",
+		std::format(L"FAA Chart Display\nVersion {}.{}.{}\n\n{}\n\nCopyright (C) 2025-2026 Matthew Moran\nLicensed under the GNU GPL v3.",
 			CD_VER_MAJOR, CD_VER_MINOR, CD_VER_PATCH, airac),
 		L"About ChartDisplay", hwnd, MessageBoxStyles::Ok, MessageBoxStyles::DefaultButton1, MessageBoxStyles::IconInformation);
 }

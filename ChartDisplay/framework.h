@@ -1,4 +1,4 @@
-// Copyright (C) 2025 Matthew Moran
+// Copyright (C) 2025-2026 Matthew Moran
 //
 // This file is part of ChartDisplay.  This program is free
 // software; you can redistribute it and/or modify it under the
