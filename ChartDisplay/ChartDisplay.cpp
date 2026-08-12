@@ -450,12 +450,15 @@ void HandleAppUpdateResult(HWND hwnd, const AppUpdateInfo& info) {
 									sei.fMask = SEE_MASK_NOASYNC; //required: this process exits right afterwards
 									sei.hwnd = hwnd;
 									sei.lpFile = installer_path.c_str();
+									//Without /UPDATE the installer finds this window still open and asks the user
+									//to close it; with it, the installer waits for the exit below and relaunches
+									//ChartDisplay once it is done.
+									sei.lpParameters = L"/UPDATE";
 									sei.nShow = SW_SHOWNORMAL;
 									if (ShellExecuteExW(&sei))
 									{
 										//The image is open, so the file behind this launch can no longer be swapped.
-										//Release the lock before leaving: a deny-delete handle can break an
-										//installer that removes its own file.
+										//Release the lock before leaving
 										sigres.locked_file.reset();
 										installer_launched = true;
 										//An installer cannot replace a running executable.
