@@ -27,12 +27,24 @@
     <ClCompile Include="BasicWindowsWrapperModule.ixx">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="Downloader.ixx">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <Image Include="ChartDisplay.ico">
       <Filter>Resource Files</Filter>
     </Image>
     <Image Include="small.ico">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="..\5-5-4.bmp">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="..\waketurb.bmp">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="waketurb.bmp">
       <Filter>Resource Files</Filter>
     </Image>
   </ItemGroup>
@@ -54,11 +66,17 @@
     <ClInclude Include="targetver.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="version.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <None Include="vcpkg.json" />
     <None Include="..\x64\Release\chartdisplay.sqlite" />
     <None Include="..\x64\Release\gpl-3.0.rtf" />
     <None Include="..\x64\Release\InstallChartDisplay.nsi" />
+    <None Include="update-pubkey.bin">
+      <Filter>Resource Files</Filter>
+    </None>
   </ItemGroup>
 </Project>

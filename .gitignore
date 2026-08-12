@@ -376,3 +376,5 @@ vcpkg_installed/
 log.txt
 #encyrption
 *.pem
+# rc.exe leaves its preprocessed .rc output (RC<6 hex>) behind when a build is interrupted
+RC[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]

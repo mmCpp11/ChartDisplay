@@ -299,10 +299,9 @@ namespace {
 		RegCloseKey(key);
 	}
 
-	//The update-signing public key, as a raw BCRYPT_RSAKEY_BLOB, read out of the rc file. Returns an empty
-	//span until IDR_UPDATE_PUBKEY is added to ChartDisplay.rc.
-	std::span<const UCHAR> UpdatePublicKeyBlob(HINSTANCE inst) noexcept {
-		HRSRC found = FindResourceW(inst, MAKEINTRESOURCEW(IDR_UPDATE_PUBKEY), RT_RCDATA);
+	//Bytes of an RCDATA resource. They live in the module's mapped image. The span stays valid for as long as the module is loaded. Empty if absent.
+	std::span<const UCHAR> ResourceBytes(HINSTANCE inst, int id) noexcept {
+		HRSRC found = FindResourceW(inst, MAKEINTRESOURCEW(id), RT_RCDATA);
 		if (!found) return {};
 		HGLOBAL loaded = LoadResource(inst, found);
 		if (!loaded) return {};
@@ -310,6 +309,37 @@ namespace {
 		const DWORD size = SizeofResource(inst, found);
 		if (!bytes || size == 0) return {};
 		return { bytes, size };
+	}
+
+	//The update-signing public key, as a raw BCRYPT_RSAKEY_BLOB. Empty if IDR_UPDATE_PUBKEY is missing, which
+	//makes the signature check fail closed.
+	std::span<const UCHAR> UpdatePublicKeyBlob(HINSTANCE inst) noexcept {
+		return ResourceBytes(inst, IDR_UPDATE_PUBKEY);
+	}
+
+	//The CWT reference image ships inside the exe, but the shell needs a real file to open. Extract it once
+	//nd reuse it after that. Returns nullopt if it could not be produced.
+	std::optional<std::filesystem::path> EnsureCWTImage(HINSTANCE inst) noexcept {
+		try {
+			const auto dir = Win64Wrapper::GetSysConfDefaultFilepath(
+				Win64Wrapper::KnownFolderID::LocalAppData, true, L"ChartDisplay");
+			const auto path = dir / L"cwt.png";
+			std::error_code ec;
+			//A zero-length file means a previous extraction died partway; rewrite rather than open nothing.
+			if (std::filesystem::exists(path, ec) && !ec && std::filesystem::file_size(path, ec) > 0 && !ec) {
+				return path;
+			}
+			const auto bytes = ResourceBytes(inst, IDR_CWT_IMAGE);
+			if (bytes.empty()) return std::nullopt;
+			std::ofstream out(path, std::ios::binary | std::ios::trunc);
+			if (!out) return std::nullopt;
+			out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+			if (!out) return std::nullopt;
+			return path;
+		}
+		catch (...) {   //GetSysConfDefaultFilepath throws if the directory cannot be created
+			return std::nullopt;
+		}
 	}
 
 	//Pull the "tag_name" value out of the GitHub release JSON without a full JSON parser: the field is a
@@ -557,7 +587,8 @@ void ShowAboutBox(HWND hwnd) {
 		airac += L"N/A";
 	}
 	Win64Wrapper::CreateMessageBox(
-		std::format(L"FAA Chart Display\nVersion {}.{}.{}\n\n{}\n\nCopyright (C) 2025-2026 Matthew Moran\nLicensed under the GNU GPL v3.",
+		std::format(L"FAA Chart Display\nVersion {}.{}.{}\n\n{}\n\nCopyright (C) 2025-2026 Matthew Moran\nLicensed under the GNU GPL v3.\n\n"
+			"For flight simulation use only. Not for real world use.",
 			CD_VER_MAJOR, CD_VER_MINOR, CD_VER_PATCH, airac),
 		L"About ChartDisplay", hwnd, MessageBoxStyles::Ok, MessageBoxStyles::DefaultButton1, MessageBoxStyles::IconInformation);
 }
@@ -888,8 +919,18 @@ LRESULT ExtraWindowProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 			//CWT button
 			else if (ctl_id == std::to_underlying(ControlIDList::ButtonCWT)) {
 				auto cwtpath = chartaccessor->GetCWTItemPath();
+				if (!cwtpath) {
+					cwtpath = EnsureCWTImage(prog_hinst);
+				}
 				if (cwtpath) {
 					OpenFileDefault(cwtpath.value());
+				} else
+				{
+					OutputDebugStringW(L"Could not extract the built-in CWT reference image.\n");
+					Win64Wrapper::CreateMessageBox(
+						L"CWT reference could not be opened.",
+						L"Wake Turbulence", hwnd, MessageBoxStyles::Ok, MessageBoxStyles::DefaultButton1,
+						MessageBoxStyles::IconWarning);
 				}
 			}
 			//handle airport buttons

@@ -1,4 +1,5 @@
 # ChartDisplay
+### <span style="color:red"> For flight simulation use only. Not for real world use. </span>
 
 ChartDisplay is a chart viewer for VATSIM controllers. Each AIRAC cycle it downloads the FAA digital Terminal Procedures Publication (dTPP) charts and organizes them by ARTCC, airport, and chart type, and it lets you add your own custom charts.
 
@@ -24,6 +25,11 @@ Charts and custom items open with your Windows default app for the file type —
 ## Custom charts
 
 Custom charts are stored in `%LOCALAPPDATA%\ChartDisplay\custom_charts.xml` and edited through the **Custom Charts** dialog. A custom chart whose source file can't be found is dropped when the list is (re)loaded, so keep the referenced files in place — in particular, if a drive letter changes, update the paths before loading.
+To load custom charts, select the type of chart in the dialog, either for an airport, a whole artcc or the cwt reference, fill in the fields asked for and click add. To remove select in the list and click remove.
+The type field for airport charts determines what section of charts it is added under.
+For existing airports in the NAS, airport class is automatically determined by FAA data. To input a fictional airport, click the custom airport button.
+Only one CWT reference is allowed. This is what is opened by clicking the "CWT Reference" button. If there is no CWT reference given, an image of the CWT charts in FAA JO 7110.65 5-5-4 will open. This is included with the program.
+All files are opened based off the default program associated with them.
 
 ## Third-party software
 

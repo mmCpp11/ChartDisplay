@@ -1436,6 +1436,7 @@ namespace charts {
 			}
 			if (r.rectype == CustomRecordType::CWT && no_cwt_record) {
 				//take the first cwt record only
+				no_cwt_record = false;
 				base_node.append_child(nodes[6]).append_child(nodes[3]).append_child(pugi::node_pcdata).set_value(r.filepath.string().c_str());
 			}
 		}

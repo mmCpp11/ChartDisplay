@@ -113,8 +113,11 @@ xcopy /Y /D "%VCRT%\vcruntime140_1.dll" "$(OutDir)"</Command>
     <ClCompile Include="Downloader.ixx" />
   </ItemGroup>
   <ItemGroup>
+    <Image Include="..\5-5-4.bmp" />
+    <Image Include="..\waketurb.bmp" />
     <Image Include="ChartDisplay.ico" />
     <Image Include="small.ico" />
+    <Image Include="waketurb.bmp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="ChartDisplay.rc" />
@@ -139,6 +142,7 @@ xcopy /Y /D "%VCRT%\vcruntime140_1.dll" "$(OutDir)"</Command>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
     </None>
+    <None Include="update-pubkey.bin" />
     <None Include="vcpkg.json" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
