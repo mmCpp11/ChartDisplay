@@ -22,9 +22,6 @@
 #define IDR_MAINFRAME                   128
 #define IDR_UPDATE_PUBKEY               132
 #define IDD_DIALOG1                     131
-#define IDD_DLGPROG                     131
-#define IDC_PROGRESS1                   1000
-#define IDC_ST_PROG                     1001
 #define IDC_CLIST                       1003
 #define IDC_PATH                        1004
 #define IDC_BUTTONFILE                  1005

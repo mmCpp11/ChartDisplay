@@ -23,9 +23,6 @@
 name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
 processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
-//Cross-thread UI signals for the chart-update worker.
-#define WM_APP_UPDATE_PROGRESS (WM_APP + 0x0010)  //-> progress dialog: refresh status text from update_status_text
-#define WM_APP_UPDATE_DONE     (WM_APP + 0x0011)  //-> main window: wParam != 0 means success
 //Posted by the app-update-check worker when it finishes; lParam is a heap-owned AppUpdateInfo* to delete.
 #define WM_APP_UPDATECHECK_DONE (WM_APP + 0x0012)
 
@@ -52,8 +49,7 @@ charts::FAAChartProcessor* chartaccessor = nullptr;
 using CCContainer = std::vector<Win64Wrapper::CommonControl>;
 //Controls are grouped by lifecycle into sections. TopARTCC is created once in WM_CREATE and persists;
 //AirportSelect is cleared/rebuilt whenever the ARTCC changes; ChartControls is cleared/rebuilt whenever
-//an airport is chosen. This makes "redraw just this region" a single .clear() instead of the old
-//keep-by-id list plus a boundary index (the now-deleted num_buttons / artcc_control_index).
+//an airport is chosen.
 enum class Section : std::size_t { TopARTCC, AirportSelect, ChartControls, Count };
 //Per-window control state: the sectioned controls plus the UI state that used to be shuttled into the
 //window proc via WM_APP custom messages. Writers mutate these directly through control_list.at(hwnd).
@@ -72,20 +68,22 @@ CommonControlMap control_list;
 //The custom-charts dialog now uses the ModelessDiagBox wrapper. Engaged while the dialog is open; its window is torn down in CustomChartProc's WM_CLOSE.
 std::optional<Win64Wrapper::ModelessDiagBox> custdlg;
 
-//Chart-update worker + its progress dialog. The worker runs UpdateCharts on its own thread; status text
-//is marshaled to the dialog via WM_APP_UPDATE_PROGRESS and completion to the main window via
-//WM_APP_UPDATE_DONE. update_status_text is shared between the worker (writer) and the dialog (reader).
+//Chart-update worker + its progress dialog. The worker runs UpdateCharts on its own thread and publishes its
+//state here; the task dialog's timer callback polls it on the UI thread, so nothing is marshaled by message.
 static HINSTANCE prog_hinst = nullptr;
-std::optional<Win64Wrapper::ModelessDiagBox> progdlg;
 std::jthread update_worker;
 std::mutex update_status_mtx;
 std::wstring update_status_text;
 std::wstring update_done_label;   //"Chart update" / "Chart reload"; set by StartChartUpdate for the result box
-bool update_cancellable = true;   //false for a reload (the organize step can't be interrupted) -> disable Cancel
+//Written last by the worker and polled by the dialog: seeing this true means update_ok is settled too.
+std::atomic<bool> update_finished{ false };
+std::atomic<bool> update_ok{ false };
+std::atomic<int> update_percent{ -1 };   //-1 = no measurable total yet, so the bar runs as a marquee
 //Run a chart operation on a worker thread behind the progress dialog. no_download=true reorganizes from the
 //already-downloaded zips (the Reload path, no network); force=true re-downloads regardless of cycle date.
+//Blocks until the operation finishes: the progress dialog is modal, which also keeps the main window (and
+//therefore the DB the worker owns) out of reach for the duration.
 void StartChartUpdate(HWND main_window, bool no_download, bool force);
-INT_PTR ProgressDlgProc(HWND, UINT, WPARAM, LPARAM);
 enum class ControlIDList : WORD {
 	StaticARTCC = 201,
 	StaticBC,
@@ -147,8 +145,8 @@ LONG DrawDynamicARTCC(const Win64Wrapper::Window& win, const charts::ARTCC artcc
 }
 void OpenAirportCharts(std::wstring, HWND,LONG);
 
-//Build the user-facing status line for a given update phase. Marquee bar + this text is the whole UX:
-//the download is opaque per-byte and the organize step has no measurable progress, so text is honest.
+//Build the user-facing status line for a given update phase. The bar shows real progress across files while
+//downloading; the organize step has no measurable end, so it falls back to a marquee and leans on this text.
 std::wstring FormatUpdateStatus(const charts::UpdateStatus& s) {
 	switch (s.phase) {
 	case charts::UpdatePhase::Checking:    return L"Checking chart availability...";
@@ -157,70 +155,104 @@ std::wstring FormatUpdateStatus(const charts::UpdateStatus& s) {
 	}
 	return L"";
 }
-//Dialog proc for IDD_DLGPROG. Runs on the UI thread; the worker only PostMessages into it.
-INT_PTR ProgressDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-	switch (msg) {
-	case WM_INITDIALOG:
-		//The bar already carries PBS_MARQUEE in the template; start its animation (30ms step).
-		SendDlgItemMessage(hwnd, IDC_PROGRESS1, PBM_SETMARQUEE, TRUE, 30);
-		//A reload can't be canceled mid-organize, so grey out Cancel rather than offer a dead button.
-		if (!update_cancellable) {
-			EnableWindow(GetDlgItem(hwnd, IDCANCEL), FALSE);
-		}
-		return TRUE;
-	case WM_APP_UPDATE_PROGRESS: {
-		std::wstring text;
-		{ std::scoped_lock lk(update_status_mtx); text = update_status_text; }
-		SetDlgItemText(hwnd, IDC_ST_PROG, text.c_str());
-		return TRUE;
-	}
-	case WM_COMMAND:
-		if (LOWORD(wParam) == IDCANCEL) {
-			update_worker.request_stop();
-			EnableWindow(GetDlgItem(hwnd, IDCANCEL), FALSE);
-			SetDlgItemText(hwnd, IDC_ST_PROG, L"Canceling, please wait...");
-			return TRUE;
-		}
-		break;
-	}
-	return FALSE;
-}
 void StartChartUpdate(HWND main_window, bool no_download, bool force) {
 	using Win64Wrapper::MessageBoxStyles;
+	namespace TDlg = Win64Wrapper::TaskDialog;
 	if (update_worker.joinable()) return; //an update is already running
 	//A reload only re-organizes the existing zips (one opaque phase), so it shows a fixed message; a real
 	//update reports per-file download progress via the reporter below.
 	const std::wstring status = no_download ? L"Reloading charts..." : L"Preparing chart update...";
 	update_done_label = no_download ? L"Chart reload" : L"Chart update";
-	update_cancellable = !no_download; //a reload has nothing the worker can interrupt mid-organize
+	const bool cancellable = !no_download; //a reload has nothing the worker can interrupt mid-organize
 	{ std::scoped_lock lk(update_status_mtx); update_status_text = status; }
-	progdlg.emplace(prog_hinst, IDD_DLGPROG, &ProgressDlgProc, main_window);
-	if (!progdlg->Display()) {
-		progdlg.reset();
-		Win64Wrapper::CreateMessageBox(L"Could not open the progress dialog.", update_done_label, main_window,
-			MessageBoxStyles::Ok, MessageBoxStyles::DefaultButton1, MessageBoxStyles::IconError);
-		return;
-	}
-	progdlg->UpdateDialogText(IDC_ST_PROG, status);
-	//Block the main window for the operation's duration: the worker owns the SQLite connection while it runs,
-	//so the UI thread must not touch the DB until it finishes (this avoids a cross-thread data race).
-	EnableWindow(main_window, FALSE);
-	HWND dlg = (*progdlg)();
-	update_worker = std::jthread([main_window, dlg, no_download, force](std::stop_token st) {
-		//For a download, the reporter stages per-file text and nudges the dialog. A reload has no measurable
+	update_finished = false;
+	update_ok = false;
+	update_percent = -1;
+
+	update_worker = std::jthread([no_download, force](std::stop_token st) {
+		//For a download the reporter stages per-file text and a percentage; a reload has no measurable
 		//sub-steps, so it passes an empty reporter and the dialog keeps showing "Reloading charts...".
 		charts::UpdateReporter reporter{};
 		if (!no_download) {
-			reporter = [dlg](const charts::UpdateStatus& s) {
+			reporter = [](const charts::UpdateStatus& s) {
 				{ std::scoped_lock lk(update_status_mtx); update_status_text = FormatUpdateStatus(s); }
-				PostMessage(dlg, WM_APP_UPDATE_PROGRESS, 0, 0);
+				//File granularity is all the reporter offers, and only while downloading.
+				update_percent = (s.phase == charts::UpdatePhase::Downloading && s.file_count > 0)
+					? (s.file_index * 100) / s.file_count
+					: -1;
 			};
 		}
 		bool ok = false;
 		try { ok = chartaccessor->UpdateCharts(no_download, force, reporter, st); }
 		catch (...) { ok = false; }
-		PostMessage(main_window, WM_APP_UPDATE_DONE, ok ? 1 : 0, 0);
+		update_ok = ok;
+		update_finished = true;   //set last: the dialog treats this as "update_ok is now readable"
 	});
+
+	//The dialog owns the wait. It is modal.
+	TDlg::TaskDialogConfig<TDlg::NoCustomButtons> cfg{
+		.parent = main_window,
+		.task_flags = TDlg::Flags::ShowMarqueeProgressBar | TDlg::Flags::PositionRelativeToWindow,
+		.common_buttons = TDlg::CommonButtons::Cancel,
+		.title = update_done_label,
+		.main_instruction = update_done_label,
+		.main_content = status,
+		.main_icon = TDlg::StandardIcon::Information,
+		.callbacks = {
+			.on_dialog_constructed = [cancellable](const auto& view) {
+				view.SetProgressBarRange(0, 100);
+				view.SetMarqueeAnimation(true, std::chrono::milliseconds{ 30 });
+				if (!cancellable) view.EnableButton(TDlg::CommonButtons::Cancel, false);
+			},
+			.on_button_clicked = [](const auto& view, auto) {
+				//The timer closes this dialog with the same Cancel id, so once the worker is done the click
+				//has to be allowed through or the dialog could never close.
+				if (update_finished.load()) return TDlg::ButtonAction::Close;
+				update_worker.request_stop();
+				view.EnableButton(TDlg::CommonButtons::Cancel, false);
+				view.SetText(TDlg::TextElement::Content, L"Canceling, please wait...", false);
+				//Stay up until the worker actually stops: it still owns the DB while it unwinds.
+				return TDlg::ButtonAction::KeepOpen;
+			},
+			.on_timer = [showing_marquee = true](const auto& view, auto) mutable {
+				if (update_finished.load()) {
+					view.Close();
+					return TDlg::TimerAction::Continue;
+				}
+				std::wstring text;
+				{ std::scoped_lock lk(update_status_mtx); text = update_status_text; }
+				//No resize: the dialog would jump on every file name change otherwise.
+				view.SetText(TDlg::TextElement::Content, text, false);
+				const int percent = update_percent.load();
+				if (const bool want_marquee = (percent < 0); want_marquee != showing_marquee) {
+					showing_marquee = want_marquee;
+					view.SetMarqueeProgressBar(want_marquee);
+					if (want_marquee) view.SetMarqueeAnimation(true, std::chrono::milliseconds{ 30 });
+				}
+				if (percent >= 0) view.SetProgressBarPos(percent);
+				return TDlg::TimerAction::Continue;
+			},
+		},
+	};
+	const auto res = TDlg::TaskDialog<TDlg::NoCustomButtons>{ std::move(cfg) }.Create();
+	//Moving over a joinable jthread requests a stop and joins, which covers both the normal path (already
+	//finished) and a dialog that never opened (worker still running, and now told to stop).
+	update_worker = {};
+	if (!res) {
+		Win64Wrapper::CreateMessageBox(L"Could not open the progress dialog; the operation was canceled.",
+			update_done_label, main_window, MessageBoxStyles::Ok, MessageBoxStyles::DefaultButton1,
+			MessageBoxStyles::IconError);
+		return;
+	}
+	if (update_ok.load()) {
+		Win64Wrapper::CreateMessageBox(std::format(L"{} complete.", update_done_label), update_done_label, main_window);
+	}
+	else {
+		Win64Wrapper::CreateMessageBox(
+			L"The operation did not complete (it was canceled or failed). Your existing charts were kept.",
+			update_done_label, main_window, MessageBoxStyles::Ok, MessageBoxStyles::DefaultButton1,
+			MessageBoxStyles::IconWarning);
+	}
 }
 
 // ---- App self-update check: query GitHub Releases, notify on a newer version, open the download page ----
@@ -353,6 +385,7 @@ void HandleAppUpdateResult(HWND hwnd, const AppUpdateInfo& info) {
 		enum class CustomUpdateButtons : int { OpenGithub = 120 };
 		TDlg::TaskDialogConfig<CustomUpdateButtons> dlgcfg {
 			.parent = hwnd,
+			.task_flags = TDlg::Flags::PositionRelativeToWindow,
 			.common_buttons = TDlg::CommonButtons::Yes | TDlg::CommonButtons::Cancel,
 			.title = L"Update Available",
 			.main_instruction = L"A new version of ChartDisplay is available.",
@@ -584,10 +617,9 @@ int wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int
 	MSG msg;
 	auto acceltable = LoadAccelerators(hInstance, MAKEINTRESOURCE(IDC_CHARTDISPLAY));
 	while (GetMessage(&msg, NULL, 0, 0) > 0) {
-		HWND prog_hwnd = progdlg ? (*progdlg)() : nullptr;
 		HWND cust_hwnd = custdlg ? (*custdlg)() : nullptr;
 		if (auto accmsg = TranslateAccelerator(msg.hwnd,acceltable,&msg);
-			( accmsg==0 && !IsDialogMessage(cust_hwnd, &msg) && !IsDialogMessage(prog_hwnd, &msg))) {
+			( accmsg==0 && !IsDialogMessage(cust_hwnd, &msg))) {
 			TranslateMessage(&msg);
 			DispatchMessage(&msg);
 		}
@@ -814,13 +846,13 @@ LRESULT ExtraWindowProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 					MessageBoxStyles::AppModal, MessageBoxStyles::IconWarning, MessageBoxStyles::DefaultButton2, MessageBoxStyles::YesNo);
 				//Assume No on any message-box failure, to avoid an accidental chart re-download.
 				if (check == Win64Wrapper::MessageBoxResponse::Yes) {
-					//Worker thread behind a progress dialog; completion lands in WM_APP_UPDATE_DONE.
+					//Worker thread behind a modal progress dialog; blocks until it finishes.
 					StartChartUpdate(hwnd, false, true);
 				}
 			}
 			return 0;
 		case IDM_RELOAD:
-			//Reorganize the already-downloaded zips (no network); completion lands in WM_APP_UPDATE_DONE.
+			//Reorganize the already-downloaded zips (no network); blocks until it finishes.
 			if (chartaccessor) StartChartUpdate(hwnd, true, false);
 			return 0;
 		case IDM_CHECKUPDATE:
@@ -955,24 +987,6 @@ LRESULT ExtraWindowProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 			}
 			break;
 		}
-		}
-		break;
-	}
-	//Posted by the chart-update worker thread when it finishes (wParam != 0 on success). Runs on the UI
-	//thread, so it is safe to touch the DB/controls again here.
-	case WM_APP_UPDATE_DONE:
-	{
-		const bool ok = wParam != 0;
-		EnableWindow(hwnd, TRUE);   //re-enable the main window before tearing down the dialog
-		progdlg.reset();            //destroy the progress dialog
-		update_worker = {};         //join the (already finished) worker
-		if (ok) {
-			Win64Wrapper::CreateMessageBox(std::format(L"{} complete.", update_done_label), update_done_label, hwnd);
-		}
-		else {
-			Win64Wrapper::CreateMessageBox(
-				L"The operation did not complete (it was canceled or failed). Your existing charts were kept.",
-				update_done_label, hwnd, MessageBoxStyles::Ok, MessageBoxStyles::DefaultButton1, MessageBoxStyles::IconWarning);
 		}
 		break;
 	}
