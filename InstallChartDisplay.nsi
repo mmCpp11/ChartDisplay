@@ -80,8 +80,18 @@ Function un.onInit
   un_done_running:
 FunctionEnd
 
+; Skips the page it is attached to during a self-update. The license was accepted at first install and
+; .onInit has already forced $INSTDIR to the recorded location, so neither page can tell the user anything
+; or change anything; Abort in a PRE function is how MUI skips a page.
+Function SkipInUpdate
+  StrCmp $UpdateMode 1 0 +2
+  Abort
+FunctionEnd
+
 ;Pages
+  !define MUI_PAGE_CUSTOMFUNCTION_PRE SkipInUpdate
   !insertmacro MUI_PAGE_LICENSE "gpl-3.0.rtf"
+  !define MUI_PAGE_CUSTOMFUNCTION_PRE SkipInUpdate
   !insertmacro MUI_PAGE_DIRECTORY
   !insertmacro MUI_PAGE_INSTFILES
 
@@ -132,6 +142,10 @@ WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\$(^Name)
 WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\$(^Name)" "NoRepair" 1
 
 StrCmp $UpdateMode 1 0 skip_relaunch
+; MUI_PAGE_INSTFILES is the last page, so without this the installer waits on its completed progress view for
+; a Close click. A self-update should get out of the way once the app is back up; a manual install still stops
+; on that page so the result can be read.
+SetAutoClose true
 Exec "$INSTDIR\ChartDisplay.exe"
 skip_relaunch:
 SectionEnd
