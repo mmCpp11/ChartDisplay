@@ -393,6 +393,9 @@ void HandleAppUpdateResult(HWND hwnd, const AppUpdateInfo& info) {
 						if (auto tmp_dir = std::filesystem::temp_directory_path(temp_error); !temp_error)
 						{
 							const auto installer_path = tmp_dir / L"ChartDisplayInstaller.exe";
+							//Cleared only once the installer is actually running, since a launched image cannot
+							//be deleted; every other way out of this block leaves a file worth removing.
+							bool installer_launched = false;
 							auto dires = Net::HttpDownloadToFile(info.installer_url, installer_path);
 							std::string signature;
 							auto disres = Net::HttpGetToString(info.sig_url, signature);
@@ -427,6 +430,7 @@ void HandleAppUpdateResult(HWND hwnd, const AppUpdateInfo& info) {
 										//Release the lock before leaving: a deny-delete handle can break an
 										//installer that removes its own file.
 										sigres.locked_file.reset();
+										installer_launched = true;
 										//An installer cannot replace a running executable.
 										PostMessageW(hwnd, WM_CLOSE, 0, 0);
 									}
@@ -434,13 +438,18 @@ void HandleAppUpdateResult(HWND hwnd, const AppUpdateInfo& info) {
 									else if (GetLastError() != ERROR_CANCELLED)
 									{
 										OutputDebugStringW(L"Failed to launch the installer.\n");
-										return;
+										other_error = true;
 									}
 								}else
 								{
 									OutputDebugStringW(L"Signature verification failed.\n");
 									other_error = true;
 								}
+							}
+							if (!installer_launched)
+							{
+								std::error_code remove_error;
+								std::filesystem::remove(installer_path, remove_error);
 							}
 						}else
 						{
