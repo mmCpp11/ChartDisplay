@@ -33,6 +33,7 @@ import std;
 import BasicWindowsWrapperModule;
 import Charts;
 import Downloader;
+namespace Net = Win64Wrapper::Net;
 
 //Fixes for standard constructs not in intellisense
 #ifdef __INTELLISENSE__
@@ -74,7 +75,7 @@ std::optional<Win64Wrapper::ModelessDiagBox> custdlg;
 //Chart-update worker + its progress dialog. The worker runs UpdateCharts on its own thread; status text
 //is marshaled to the dialog via WM_APP_UPDATE_PROGRESS and completion to the main window via
 //WM_APP_UPDATE_DONE. update_status_text is shared between the worker (writer) and the dialog (reader).
-HINSTANCE prog_hinst = nullptr;
+static HINSTANCE prog_hinst = nullptr;
 std::optional<Win64Wrapper::ModelessDiagBox> progdlg;
 std::jthread update_worker;
 std::mutex update_status_mtx;
@@ -229,12 +230,28 @@ struct AppUpdateInfo {
 	bool checked_ok = false;        //network fetch + version parse both succeeded
 	bool update_available = false;  //a newer release than this build exists
 	std::wstring latest;            //latest version, e.g. L"2.1.0" (only meaningful when checked_ok)
+	std::wstring raw_version;	    //raw version tag from github
+	std::wstring installer_url;		//installer download url, created from raw_version
+	std::wstring sig_url;			//installer signature url, created from raw_version
 	bool manual = false;            //true if the user asked (Help->Check for Updates); false for the silent startup check
 };
 
 namespace {
 	constexpr wchar_t kLatestReleaseApi[] = L"https://api.github.com/repos/mmCpp11/ChartDisplay/releases/latest";
 	constexpr wchar_t kReleasesPage[] = L"https://github.com/mmCpp11/ChartDisplay/releases/latest";
+
+	//The update-signing public key, as a raw BCRYPT_RSAKEY_BLOB, read out of the rc file. Returns an empty
+	//span until IDR_UPDATE_PUBKEY is added to ChartDisplay.rc.
+	std::span<const UCHAR> UpdatePublicKeyBlob(HINSTANCE inst) noexcept {
+		HRSRC found = FindResourceW(inst, MAKEINTRESOURCEW(IDR_UPDATE_PUBKEY), RT_RCDATA);
+		if (!found) return {};
+		HGLOBAL loaded = LoadResource(inst, found);
+		if (!loaded) return {};
+		const auto* bytes = static_cast<const UCHAR*>(LockResource(loaded));
+		const DWORD size = SizeofResource(inst, found);
+		if (!bytes || size == 0) return {};
+		return { bytes, size };
+	}
 
 	//Pull the "tag_name" value out of the GitHub release JSON without a full JSON parser: the field is a
 	//simple "tag_name":"vX.Y.Z" pair, so find the key and read the next quoted token.
@@ -287,6 +304,10 @@ void StartAppUpdateCheck(HWND main_window, bool manual) {
 					const std::array<int, 3> local{ CD_VER_MAJOR, CD_VER_MINOR, CD_VER_PATCH };
 					info->update_available = (*remote > local);
 					info->latest = std::format(L"{}.{}.{}", (*remote)[0], (*remote)[1], (*remote)[2]);
+					//reconstruct original tag to ensure only digits are in the tag
+					info->raw_version = std::format(L"v{}.{}.{}", (*remote)[0], (*remote)[1], (*remote)[2]);
+					info->installer_url = std::format(L"https://github.com/mmCpp11/ChartDisplay/releases/download/{0}/InstallChartDisplay.exe", info->raw_version);
+					info->sig_url = std::format(L"https://github.com/mmCpp11/ChartDisplay/releases/download/{0}/InstallChartDisplay.exe.sig", info->raw_version);
 				}
 			}
 		}
@@ -297,15 +318,144 @@ void StartAppUpdateCheck(HWND main_window, bool manual) {
 //UI-thread handler for a finished update check (called from WM_APP_UPDATECHECK_DONE).
 void HandleAppUpdateResult(HWND hwnd, const AppUpdateInfo& info) {
 	using Win64Wrapper::MessageBoxStyles;
+	namespace TDlg = Win64Wrapper::TaskDialog;
+	using TDlg::TaskDialog;
+	bool other_error = false;
 	if (info.update_available) {
 		const auto current = std::format(L"{}.{}.{}", CD_VER_MAJOR, CD_VER_MINOR, CD_VER_PATCH);
-		auto resp = Win64Wrapper::CreateMessageBox(
-			std::format(L"A new version of ChartDisplay is available.\n\nInstalled: {}\nLatest: {}\n\nOpen the download page now?",
+		enum class CustomUpdateButtons : int { OpenGithub = 120 };
+		TDlg::TaskDialogConfig<CustomUpdateButtons> dlgcfg {
+			.parent = hwnd,
+			.common_buttons = TDlg::CommonButtons::Yes | TDlg::CommonButtons::Cancel,
+			.title = L"Update Available",
+			.main_instruction = L"A new version of ChartDisplay is available.",
+			.main_content = std::format(L"Installed: {}\nLatest: {}\n\nInstall now?",
 				current, info.latest),
-			L"Update Available", hwnd,
-			MessageBoxStyles::YesNo, MessageBoxStyles::DefaultButton1, MessageBoxStyles::IconInformation);
-		if (resp == Win64Wrapper::MessageBoxResponse::Yes) {
-			ShellExecuteW(hwnd, L"open", kReleasesPage, nullptr, nullptr, SW_SHOWNORMAL);
+			.buttons = { { CustomUpdateButtons::OpenGithub, L"Open GitHub" }},
+			.main_icon = TDlg::StandardIcon::Information,
+			.default_button = TDlg::CommonButtons::Cancel,
+			.callbacks = {
+				.on_button_clicked = [hwnd](const auto&, auto button)
+				{
+					if (const auto* custom = std::get_if<CustomUpdateButtons>(&button); 
+						custom && *custom == CustomUpdateButtons::OpenGithub)
+					{
+						ShellExecuteW(hwnd, L"open", kReleasesPage, nullptr, nullptr, SW_SHOWNORMAL);
+						return TDlg::ButtonAction::KeepOpen;
+					}
+					return TDlg::ButtonAction::Close;
+				},
+			},
+		};
+		//Validate the config for errors
+		TDlg::TaskDialogResponse<CustomUpdateButtons> res;
+		if (const HRESULT valid = TDlg::ValidateTaskDialogConfig(dlgcfg); FAILED(valid))
+		{
+			OutputDebugStringW(L"TaskDialog failed with TaskDialogConfig validation error\n");
+			res.res = E_FAIL;
+		} else {
+			TaskDialog update_window(std::move(dlgcfg));
+			res = update_window.Create(false);
+		}
+		//if failed, fall back to message box
+		if (!res)
+		{
+			if (res.res == E_INVALIDARG)
+			{
+				OutputDebugStringW(L"TaskDialog failed with E_INVALIDARG: comctl32 error\n");
+			}
+			auto resp = Win64Wrapper::CreateMessageBox(
+				std::format(
+					L"A new version of ChartDisplay is available.\n\nInstalled: {}\nLatest: {}\n\nOpen Release Page?",
+					current, info.latest),
+				L"Update Available", hwnd,
+				MessageBoxStyles::YesNo, MessageBoxStyles::DefaultButton1, MessageBoxStyles::IconInformation);
+			if (resp == Win64Wrapper::MessageBoxResponse::Yes)
+			{
+				ShellExecuteW(hwnd, L"open", kReleasesPage, nullptr, nullptr, SW_SHOWNORMAL);
+			}
+		} else
+		{
+			if (auto button_value = std::get_if<TDlg::CommonButtons>(&res.button.value()); button_value)
+			{
+				if (*button_value == TDlg::CommonButtons::Yes)
+				{
+					auto proberes_install = Net::HttpProbe(info.installer_url);
+					auto proberes_sig = Net::HttpProbe(info.sig_url);
+					//operator bool is "completed with a 2xx"; transport_ok alone counts a 404 as success
+					if (!proberes_install || !proberes_sig)
+					{
+						OutputDebugStringW(L"HTTP Probe of installer or sig failed.\n");
+						other_error = true;
+					} else
+					{
+						std::error_code temp_error;
+						if (auto tmp_dir = std::filesystem::temp_directory_path(temp_error); !temp_error)
+						{
+							const auto installer_path = tmp_dir / L"ChartDisplayInstaller.exe";
+							auto dires = Net::HttpDownloadToFile(info.installer_url, installer_path);
+							std::string signature;
+							auto disres = Net::HttpGetToString(info.sig_url, signature);
+							if (!dires || !disres)
+							{
+								OutputDebugStringW(L"HTTP Download of installer or sig failed.\n");
+								other_error = true;
+							}else
+							{
+								auto public_key_blob = UpdatePublicKeyBlob(prog_hinst);
+								if (public_key_blob.empty())
+								{
+									OutputDebugStringW(L"Could not load public key blob.\n");
+									other_error = true;
+								}else if (auto sigres = Net::VerifyDetachedSignature(installer_path,
+										std::span{reinterpret_cast<const UCHAR*>(signature.data()), signature.size()},
+										public_key_blob); sigres)
+								{
+									
+									//ShellExecuteEx rather than CreateChildProcess: CreateProcess cannot raise a UAC
+									//prompt and fails with ERROR_ELEVATION_REQUIRED against an installer manifested
+									//requireAdministrator. A null verb leaves the decision to that manifest, so a
+									//per-user install is never prompted for nothing.
+									SHELLEXECUTEINFOW sei{ sizeof(sei) };
+									sei.fMask = SEE_MASK_NOASYNC; //required: this process exits right afterwards
+									sei.hwnd = hwnd;
+									sei.lpFile = installer_path.c_str();
+									sei.nShow = SW_SHOWNORMAL;
+									if (ShellExecuteExW(&sei))
+									{
+										//The image is open, so the file behind this launch can no longer be swapped.
+										//Release the lock before leaving: a deny-delete handle can break an
+										//installer that removes its own file.
+										sigres.locked_file.reset();
+										//An installer cannot replace a running executable.
+										PostMessageW(hwnd, WM_CLOSE, 0, 0);
+									}
+									//ERROR_CANCELLED is the user declining the UAC prompt
+									else if (GetLastError() != ERROR_CANCELLED)
+									{
+										OutputDebugStringW(L"Failed to launch the installer.\n");
+										return;
+									}
+								}else
+								{
+									OutputDebugStringW(L"Signature verification failed.\n");
+									other_error = true;
+								}
+							}
+						}else
+						{
+							OutputDebugStringW(L"Could not get temp directory (std::filesystem::temp_directory_path).\n");
+							other_error = true;
+						}
+					}
+				}
+			}
+		}
+		if (other_error)
+		{
+			Win64Wrapper::CreateMessageBox(
+			L"Could not check for updates. Please check your internet connection and try again.",
+			L"Update Check Failed", hwnd, MessageBoxStyles::Ok, MessageBoxStyles::DefaultButton1, MessageBoxStyles::IconWarning);
 		}
 		return;
 	}
@@ -403,7 +553,30 @@ int wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int
 	}
 	return 0;
 }
+//Window messages arrive through a kernel-mode callback, and on x64 an exception that escapes back across
+//that boundary can be swallowed outright - no handler, no crash, nothing to diagnose.
+//Prevent exceptions from propagating out of the windowproc
+LRESULT ExtraWindowProcImpl(HWND, UINT, WPARAM, LPARAM);
 LRESULT ExtraWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+	try {
+		return ExtraWindowProcImpl(hwnd, msg, wParam, lParam);
+	}
+	//No formatting or allocation on this path: it runs when something has already gone wrong.
+	catch (const std::exception& ex) {
+		OutputDebugStringA("ExtraWindowProc: unhandled exception: ");
+		OutputDebugStringA(ex.what());
+		OutputDebugStringA("\n");
+	}
+	catch (...) {
+		OutputDebugString(L"ExtraWindowProc: unhandled non-standard exception\n");
+	}
+	//-1 from WM_CREATE aborts CreateWindow (DisplayWindow then returns false and wWinMain exits) rather
+	//than leaving a half-built main window running. Every other message falls back to default handling.
+	if (msg == WM_CREATE) return -1;
+	return DefWindowProc(hwnd, msg, wParam, lParam);
+}
+LRESULT ExtraWindowProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
 	using Win64Wrapper::CommonControl;
 	using Win64Wrapper::ControlNames;

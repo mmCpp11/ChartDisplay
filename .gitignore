@@ -374,3 +374,5 @@ vcpkg_installed/
 .idea/
 # Runtime log written by the app
 log.txt
+#encyrption
+*.pem

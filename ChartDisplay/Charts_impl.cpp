@@ -36,6 +36,8 @@ import Downloader;
 import "csv.hpp";
 import "pugixml.hpp";
 
+namespace Net = Win64Wrapper::Net;
+
 //necessary windows stuff TODO: implement progress bar for chart downloading
 //struct HINSTANCE__ { int unused; }; typedef struct HINSTANCE__* HINSTANCE;
 //struct HWND__ { int unused; }; typedef struct HWND__* HWND;

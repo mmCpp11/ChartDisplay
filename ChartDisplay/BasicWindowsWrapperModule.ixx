@@ -1298,6 +1298,591 @@ namespace Win64Wrapper {
                 return static_cast<MessageBoxResponse>(check);
             }
         }
+        //Task Dialog
+        namespace TaskDialog
+        {
+            enum class Flags : DWORD
+            {
+                Default = 0,
+                EnableHyperlinks = TDF_ENABLE_HYPERLINKS,
+                HiconMain = TDF_USE_HICON_MAIN,
+                HiconFooter = TDF_USE_HICON_FOOTER,
+                AllowDialogCancellation = TDF_ALLOW_DIALOG_CANCELLATION,
+                CommandLinks = TDF_USE_COMMAND_LINKS,
+                CommandLinksNoIcon = TDF_USE_COMMAND_LINKS_NO_ICON,
+                ExpandFooterArea = TDF_EXPAND_FOOTER_AREA,
+                ExpandedByDefault = TDF_EXPANDED_BY_DEFAULT,
+                VerificationFlagChecked = TDF_VERIFICATION_FLAG_CHECKED,
+                ShowProgressBar = TDF_SHOW_PROGRESS_BAR,
+                ShowMarqueeProgressBar = TDF_SHOW_MARQUEE_PROGRESS_BAR,
+                CallbackTimer = TDF_CALLBACK_TIMER,
+                PositionRelativeToWindow = TDF_POSITION_RELATIVE_TO_WINDOW,
+                RTLLayout = TDF_RTL_LAYOUT,
+                NoDefaultRadioButton = TDF_NO_DEFAULT_RADIO_BUTTON,
+                AllowMinimize = TDF_CAN_BE_MINIMIZED,
+                SizeToContent = TDF_SIZE_TO_CONTENT
+            };
+            enum class CommonButtons : DWORD
+            {
+                None = 0,
+                Ok = TDCBF_OK_BUTTON,
+                Yes = TDCBF_YES_BUTTON,
+                No = TDCBF_NO_BUTTON,
+                Cancel = TDCBF_CANCEL_BUTTON,
+                Close = TDCBF_CLOSE_BUTTON,
+                Retry = TDCBF_RETRY_BUTTON
+            };
+        }
+    }
+    //Task dialog internals: module linkage, so the exported templates below can use these while an importer
+    //cannot name them. Not an anonymous namespace - internal linkage would make them TU-local, and a TU-local
+    //entity cannot be referenced by the definition of an exported template.
+    namespace TaskDialog
+    {
+        //enable_bitmask helper
+        template<class E> struct enable_bitmask : std::false_type {};
+        template<> struct enable_bitmask<Flags> : std::true_type {};
+        template<> struct enable_bitmask<CommonButtons> : std::true_type {};
+        //Common buttons go in as a bitmask but come back as a plain control id, so Create() needs both ways.
+        constexpr int CommonButtonToId(CommonButtons b) noexcept
+        {
+            switch (b) {
+            case CommonButtons::Ok:     return IDOK;
+            case CommonButtons::Yes:    return IDYES;
+            case CommonButtons::No:     return IDNO;
+            case CommonButtons::Cancel: return IDCANCEL;
+            case CommonButtons::Close:  return IDCLOSE;
+            case CommonButtons::Retry:  return IDRETRY;
+            default:                    return 0;
+            }
+        }
+        constexpr std::optional<CommonButtons> IdToCommonButton(int id) noexcept
+        {
+            switch (id) {
+            case IDOK:     return CommonButtons::Ok;
+            case IDYES:    return CommonButtons::Yes;
+            case IDNO:     return CommonButtons::No;
+            case IDCANCEL: return CommonButtons::Cancel;
+            case IDCLOSE:  return CommonButtons::Close;
+            case IDRETRY:  return CommonButtons::Retry;
+            default:       return std::nullopt;
+            }
+        }
+    }//end namespace TaskDialog internal
+    export {
+        namespace TaskDialog //start namespace task dialog export
+        {
+            //exported: callers write CommonButtons::Yes | CommonButtons::Cancel for themselves
+            template<class E> requires enable_bitmask<E>::value
+            constexpr E operator|(E lhs, E rhs) noexcept
+            {
+                return static_cast<E>(std::to_underlying(lhs) | std::to_underlying(rhs));
+            }
+            template<class E> requires enable_bitmask<E>::value
+            constexpr E& operator|=(E& lhs, E rhs) noexcept { return lhs = lhs | rhs; }
+
+            enum class NoCustomButtons : int {};
+            //An enum of control ids for custom buttons or radio buttons. CommonButtons and Flags are excluded:
+            //they are TDCBF_/TDF_ bitmasks rather than ids, and CommonButtons in particular would make
+            //std::variant<CommonButtons, T> degenerate. Values must be >= 100 to stay clear of IDOK..IDCONTINUE,
+            //which is on the caller to honor.
+            template<class T>
+            concept ControlIds = std::is_scoped_enum_v<T> && !std::same_as<T, CommonButtons> && !std::same_as<T, Flags>;
+            //TD_*_ICON are MAKEINTRESOURCEW values (pointers), so only the numeric part is kept; Create()
+            //rebuilds the pointer with MAKEINTRESOURCEW.
+            enum class StandardIcon : WORD
+            {
+                None = 0,
+                Warning = static_cast<WORD>(-1),
+                Error = static_cast<WORD>(-2),
+                Information = static_cast<WORD>(-3),
+                Shield = static_cast<WORD>(-4)
+            };
+            template<ControlIds TaskDialogButtons, ControlIds TaskDialogRadios = NoCustomButtons>
+            struct TaskDialogResponse
+            {
+                HRESULT res=E_FAIL;
+                std::optional<std::variant<CommonButtons,TaskDialogButtons>> button;
+                //no common radio buttons exist, so this is never a CommonButtons
+                std::optional<TaskDialogRadios> radio;
+                std::optional<bool> verification;
+                //true when the dialog ran; says nothing about which button was pressed
+                explicit operator bool() const noexcept { return SUCCEEDED(res); }
+            };
+            template <class Id>
+            struct TaskButtonData
+            {
+                Id id;
+                std::wstring text;
+            };
+            struct ExpandedInfo
+            {
+                std::wstring info;
+                std::optional<std::wstring> expanded_label;
+                std::optional<std::wstring> collapsed_label;
+            };
+            //Text that can be replaced while the dialog is up. An element that was left empty at creation does
+            //not exist and cannot be filled in later - the dialog only reserves space for what it was given.
+            enum class TextElement : int
+            {
+                Content = TDE_CONTENT,
+                ExpandedInformation = TDE_EXPANDED_INFORMATION,
+                Footer = TDE_FOOTER,
+                MainInstruction = TDE_MAIN_INSTRUCTION
+            };
+            enum class IconElement : int
+            {
+                Main = TDIE_ICON_MAIN,
+                Footer = TDIE_ICON_FOOTER
+            };
+            enum class ProgressState : int
+            {
+                Normal = PBST_NORMAL,
+                Error = PBST_ERROR,
+                Paused = PBST_PAUSED
+            };
+            enum class ButtonAction { Close, KeepOpen };
+            //Whether the elapsed time keeps counting up or starts over.
+            enum class TimerAction { Continue, ResetTickCount };
+            //Non-owning view of a running task dialog, handed to every callback.
+            template<ControlIds TaskDialogButtons, ControlIds TaskDialogRadios = NoCustomButtons>
+            class TaskDialogView
+            {
+            public:
+                explicit TaskDialogView(HWND dialog) noexcept : hwnd(dialog) {}
+                HWND Handle() const noexcept { return hwnd; }
+                void ClickButton(TaskDialogButtons id) const noexcept { Send(TDM_CLICK_BUTTON, IdOf(id)); }
+                void ClickButton(CommonButtons id) const noexcept { Send(TDM_CLICK_BUTTON, CommonButtonToId(id)); }
+                void Close() const noexcept { Send(TDM_CLICK_BUTTON, IDCANCEL); }
+                void EnableButton(TaskDialogButtons id, bool enabled) const noexcept { Send(TDM_ENABLE_BUTTON, IdOf(id), enabled); }
+                void EnableButton(CommonButtons id, bool enabled) const noexcept { Send(TDM_ENABLE_BUTTON, CommonButtonToId(id), enabled); }
+                //Puts the UAC shield on the button; the caller still has to do the elevating.
+                void SetButtonElevationRequired(TaskDialogButtons id, bool required) const noexcept
+                {
+                    Send(TDM_SET_BUTTON_ELEVATION_REQUIRED_STATE, IdOf(id), required);
+                }
+                void ClickRadioButton(TaskDialogRadios id) const noexcept { Send(TDM_CLICK_RADIO_BUTTON, IdOf(id)); }
+                void EnableRadioButton(TaskDialogRadios id, bool enabled) const noexcept { Send(TDM_ENABLE_RADIO_BUTTON, IdOf(id), enabled); }
+                void ClickVerification(bool checked, bool set_focus = false) const noexcept
+                {
+                    Send(TDM_CLICK_VERIFICATION, checked, set_focus);
+                }
+                void SetText(TextElement element, const std::wstring& text, bool resize = true) const noexcept
+                {
+                    Send(resize ? TDM_SET_ELEMENT_TEXT : TDM_UPDATE_ELEMENT_TEXT,
+                        static_cast<WPARAM>(std::to_underlying(element)), reinterpret_cast<LPARAM>(text.c_str()));
+                }
+                //An icon can only be swapped for one of its own kind
+                void SetIcon(IconElement element, StandardIcon icon) const noexcept
+                {
+                    Send(TDM_UPDATE_ICON, static_cast<WPARAM>(std::to_underlying(element)),
+                        reinterpret_cast<LPARAM>(MAKEINTRESOURCEW(std::to_underlying(icon))));
+                }
+                void SetIcon(IconElement element, HICON icon) const noexcept
+                {
+                    Send(TDM_UPDATE_ICON, static_cast<WPARAM>(std::to_underlying(element)), reinterpret_cast<LPARAM>(icon));
+                }
+                //Switches an existing progress bar between the two styles
+                void SetMarqueeProgressBar(bool marquee) const noexcept { Send(TDM_SET_MARQUEE_PROGRESS_BAR, marquee); }
+                //Starts or stops the marquee animation, sweeping once per interval.
+                void SetMarqueeAnimation(bool running, std::chrono::milliseconds interval = std::chrono::milliseconds{ 0 }) const noexcept
+                {
+                    Send(TDM_SET_PROGRESS_BAR_MARQUEE, running, static_cast<LPARAM>(interval.count()));
+                }
+                void SetProgressBarState(ProgressState state) const noexcept
+                {
+                    Send(TDM_SET_PROGRESS_BAR_STATE, static_cast<WPARAM>(std::to_underlying(state)));
+                }
+                //The range is a pair of WORDs, so both ends are capped at 65535.
+                void SetProgressBarRange(WORD min, WORD max) const noexcept
+                {
+                    Send(TDM_SET_PROGRESS_BAR_RANGE, 0, MAKELPARAM(min, max));
+                }
+                //returns the position the bar was at before this call
+                int SetProgressBarPos(int pos) const noexcept
+                {
+                    return static_cast<int>(SendQuery(TDM_SET_PROGRESS_BAR_POS, static_cast<WPARAM>(pos)));
+                }
+                //Escape hatch for the TDM_ messages with no wrapper above, the counterpart to Window::SendWinMsg.
+                //post: if true, use PostMessage, if false use SendMessage
+                long long SendTaskDlgMsg(UINT msg, WPARAM wParam, LPARAM lParam, bool post = false) const noexcept
+                {
+                    if (!post) { return SendQuery(msg, wParam, lParam); }
+                    return PostMessageW(hwnd, msg, wParam, lParam);
+                }
+            private:
+                static constexpr WPARAM IdOf(auto id) noexcept { return static_cast<WPARAM>(std::to_underlying(id)); }
+                //TDM_ messages that answer with something worth reading go through SendQuery; the rest return
+                //an undocumented value that would only be dropped anyway.
+                void Send(UINT msg, WPARAM wparam = 0, LPARAM lparam = 0) const noexcept
+                {
+                    SendMessageW(hwnd, msg, wparam, lparam);
+                }
+                LRESULT SendQuery(UINT msg, WPARAM wparam = 0, LPARAM lparam = 0) const noexcept
+                {
+                    return SendMessageW(hwnd, msg, wparam, lparam);
+                }
+                HWND hwnd;
+            };
+            //Handlers for the TDN_* notifications, all optional. They run on the thread that called Create(),
+            //nested inside it
+            template<ControlIds TaskDialogButtons, ControlIds TaskDialogRadios = NoCustomButtons>
+            struct TaskDialogCallbacks
+            {
+                using View = TaskDialogView<TaskDialogButtons, TaskDialogRadios>;
+                //If for some application, a raw callback is needed. Return nullopt to fall through,
+                //an HRESULT after handling. Unlike WNDPROC, this callback can only receive the TDN_ messages
+                std::function<std::optional<HRESULT>(const View&, UINT, WPARAM, LPARAM)> on_notification;
+                //the dialog exists but is not yet visible
+                std::function<void(const View&)> on_created;
+                //raised once per page
+                std::function<void(const View&)> on_dialog_constructed;
+                std::function<void(const View&)> on_navigated;
+                //Returning KeepOpen swallows the click and leaves the dialog up.
+                std::function<ButtonAction(const View&, std::variant<CommonButtons, TaskDialogButtons>)> on_button_clicked;
+                std::function<void(const View&, TaskDialogRadios)> on_radio_clicked;
+                //the new checked state, not the old one
+                std::function<void(const View&, bool)> on_verification_clicked;
+                //true when the expando was just opened
+                std::function<void(const View&, bool)> on_expando_clicked;
+                //The href of the clicked <A> tag; navigating is up to the handler. 
+                // Setting this turns on hyperlink parsing for the whole dialog.
+                std::function<void(const View&, std::wstring_view)> on_hyperlink_clicked;
+                //Roughly every 200ms, with the time elapsed since the dialog was created or since the last
+                //ResetTickCount. Setting this turns the timer on.
+                std::function<TimerAction(const View&, std::chrono::milliseconds)> on_timer;
+                //F1, or the help button of a dialog that has one
+                std::function<void(const View&)> on_help;
+                //the last notification, and the only one where the window is already beyond saving
+                std::function<void(const View&)> on_destroyed;
+                bool HasHandlers() const noexcept
+                {
+                    return on_notification || on_created || on_dialog_constructed || on_navigated || on_button_clicked
+                        || on_radio_clicked || on_verification_clicked || on_expando_clicked
+                        || on_hyperlink_clicked || on_timer || on_help || on_destroyed;
+                }
+            };
+            template<ControlIds TaskDialogButtons, ControlIds TaskDialogRadios = NoCustomButtons>
+            struct TaskDialogConfig
+            {
+                HINSTANCE inst = nullptr;   //only needed for MAKEINTRESOURCE strings/icons
+                HWND parent = nullptr;
+                Flags task_flags = Flags::Default;
+                CommonButtons common_buttons = CommonButtons::None;
+                std::wstring title;
+                std::wstring main_instruction;
+                std::wstring main_content;
+                std::vector<TaskButtonData<TaskDialogButtons>> buttons;
+                std::vector<TaskButtonData<TaskDialogRadios>> radios;
+                std::optional<std::variant<StandardIcon, HICON>> main_icon;
+                std::optional<ExpandedInfo> expanded_info;
+                std::optional<std::wstring> footer_text;
+                std::optional<std::wstring> verification_text;
+                //a CommonButtons default only takes effect if that button is also in common_buttons
+                std::optional<std::variant<CommonButtons, TaskDialogButtons>> default_button;
+                std::optional<TaskDialogRadios> default_radio;
+                //empty by default; setting on_timer or on_hyperlink_clicked also sets the flag each one needs
+                TaskDialogCallbacks<TaskDialogButtons, TaskDialogRadios> callbacks;
+            };
+            //Returns E_INVALIDARG for a config whose response would be ambiguous, or whose default
+            //names a control that was never added (which the dialog ignores silently).
+            template<ControlIds TaskDialogButtons, ControlIds TaskDialogRadios>
+            HRESULT ValidateTaskDialogConfig(const TaskDialogConfig<TaskDialogButtons, TaskDialogRadios>& cfg) noexcept
+            {
+                auto id_of = [](const auto& item) { return static_cast<int>(std::to_underlying(item.id)); };
+                auto has_duplicate_ids = [&id_of](const auto& items) {
+                    for (std::size_t i = 0; i < items.size(); ++i) {
+                        for (std::size_t j = i + 1; j < items.size(); ++j) {
+                            if (id_of(items[i]) == id_of(items[j])) return true;
+                        }
+                    }
+                    return false;
+                    };
+                if (has_duplicate_ids(cfg.buttons) || has_duplicate_ids(cfg.radios)) return E_INVALIDARG;
+
+                constexpr std::array common_set{ CommonButtons::Ok, CommonButtons::Yes, CommonButtons::No,
+                    CommonButtons::Cancel, CommonButtons::Close, CommonButtons::Retry };
+                const auto requested = std::to_underlying(cfg.common_buttons);
+                for (const auto& b : cfg.buttons) {
+                    const int id = id_of(b);
+                    //IDCANCEL is reserved whatever common_buttons says: Esc and the X report it regardless.
+                    if (id == IDCANCEL) return E_INVALIDARG;
+                    for (auto cb : common_set) {
+                        if ((requested & std::to_underlying(cb)) != 0 && id == CommonButtonToId(cb)) return E_INVALIDARG;
+                    }
+                }
+                if (cfg.default_button) {
+                    if (const auto* custom = std::get_if<TaskDialogButtons>(&*cfg.default_button)) {
+                        if (std::ranges::none_of(cfg.buttons, [custom](const auto& b) { return b.id == *custom; })) {
+                            return E_INVALIDARG;
+                        }
+                    }
+                    else if ((requested & std::to_underlying(std::get<CommonButtons>(*cfg.default_button))) == 0) {
+                        return E_INVALIDARG;
+                    }
+                }
+                if (cfg.default_radio &&
+                    std::ranges::none_of(cfg.radios, [&cfg](const auto& r) { return r.id == *cfg.default_radio; })) {
+                    return E_INVALIDARG;
+                }
+                return S_OK;
+            }
+            template<ControlIds TaskDialogButtons, ControlIds TaskDialogRadios = NoCustomButtons>
+            class TaskDialog
+            {
+            public:
+                explicit TaskDialog(TaskDialogConfig<TaskDialogButtons, TaskDialogRadios> config) : cfg(std::move(config)) {}
+                //blocking and modal. validate_config disables validation. Intended to be used if you validate the config before calling Create
+                TaskDialogResponse<TaskDialogButtons, TaskDialogRadios> Create(bool validate_config = true) const
+                {
+                    TaskDialogResponse<TaskDialogButtons, TaskDialogRadios> res;
+                    if (validate_config)
+                    {
+                        if (const HRESULT valid = ValidateTaskDialogConfig(cfg); FAILED(valid))
+                        {
+                            res.res = valid;
+                            return res;
+                        }
+                    }
+                    //TASKDIALOGCONFIG borrows every pointer and owns nothing, so these arrays have to outlive
+                    //TaskDialogIndirect: function scope, not the scope of the block that fills them.
+                    std::vector<TASKDIALOG_BUTTON> buttons;
+                    buttons.reserve(cfg.buttons.size());
+                    for (const auto& button : cfg.buttons)
+                    {
+                        buttons.push_back({ static_cast<int>(std::to_underlying(button.id)), button.text.c_str() });
+                    }
+                    std::vector<TASKDIALOG_BUTTON> radios;
+                    radios.reserve(cfg.radios.size());
+                    for (const auto& radio : cfg.radios)
+                    {
+                        radios.push_back({ static_cast<int>(std::to_underlying(radio.id)), radio.text.c_str() });
+                    }
+                    //An empty string is not the same as no string: the dialog only substitutes its own default
+                    //(the exe name, for the title) when the pointer is null.
+                    auto or_null = [](const std::wstring& s) -> PCWSTR { return s.empty() ? nullptr : s.c_str(); };
+
+                    TASKDIALOGCONFIG task_config {
+                        .cbSize = sizeof(TASKDIALOGCONFIG),
+                        .hwndParent = cfg.parent,
+                        .hInstance = cfg.inst,
+                        //TASKDIALOG_FLAGS and TASKDIALOG_COMMON_BUTTON_FLAGS are both int, so the DWORD from
+                        //to_underlying narrows; inside a braced initializer that is an error, not a warning.
+                        .dwFlags = static_cast<TASKDIALOG_FLAGS>(std::to_underlying(cfg.task_flags)),
+                        .dwCommonButtons = static_cast<TASKDIALOG_COMMON_BUTTON_FLAGS>(std::to_underlying(cfg.common_buttons)),
+                        .pszWindowTitle = or_null(cfg.title),
+                        .pszMainInstruction = or_null(cfg.main_instruction),
+                        .pszContent = or_null(cfg.main_content),
+                        .cButtons = static_cast<UINT>(buttons.size()),
+                        .pButtons = buttons.empty() ? nullptr : buttons.data(),
+                        .cRadioButtons = static_cast<UINT>(radios.size()),
+                        .pRadioButtons = radios.empty() ? nullptr : radios.data(),
+                    };
+                    //get_if tests the active alternative - get would throw bad_variant_access on the other one.
+                    if (cfg.main_icon)
+                    {
+                        if (const auto* hicon = std::get_if<HICON>(&cfg.main_icon.value()))
+                        {
+                            task_config.hMainIcon = *hicon;
+                            task_config.dwFlags |= TDF_USE_HICON_MAIN;
+                        }
+                        else if (const auto icon = std::get<StandardIcon>(cfg.main_icon.value()); icon != StandardIcon::None)
+                        {
+                            task_config.pszMainIcon = MAKEINTRESOURCEW(std::to_underlying(icon));
+                            task_config.dwFlags &= ~TDF_USE_HICON_MAIN;
+                        }
+                    }
+                    //Leaving nDefaultButton at 0 selects the first button, so an absent default is not an error.
+                    if (cfg.default_button)
+                    {
+                        task_config.nDefaultButton = std::visit([](auto id) -> int {
+                            if constexpr (std::same_as<decltype(id), CommonButtons>) return CommonButtonToId(id);
+                            else return static_cast<int>(std::to_underlying(id));
+                            }, cfg.default_button.value());
+                    }
+                    if (cfg.default_radio)
+                    {
+                        task_config.nDefaultRadioButton = static_cast<int>(std::to_underlying(cfg.default_radio.value()));
+                    }
+                    if (cfg.expanded_info)
+                    {
+                        task_config.pszExpandedInformation = or_null(cfg.expanded_info->info);
+                        if (cfg.expanded_info->expanded_label)
+                        {
+                            task_config.pszExpandedControlText = cfg.expanded_info->expanded_label->c_str();
+                        }
+                        if (cfg.expanded_info->collapsed_label)
+                        {
+                            task_config.pszCollapsedControlText = cfg.expanded_info->collapsed_label->c_str();
+                        }
+                    }
+                    if (cfg.footer_text)
+                    {
+                        task_config.pszFooter = cfg.footer_text->c_str();
+                    }
+                    if (cfg.verification_text)
+                    {
+                        task_config.pszVerificationText = cfg.verification_text->c_str();
+                    }
+                    //Like the arrays above, this has to outlive TaskDialogIndirect: the dialog holds the pointer
+                    //for as long as it is up and hands it back to every callback.
+                    CallbackState state{ .callbacks = &cfg.callbacks };
+                    if (cfg.callbacks.HasHandlers())
+                    {
+                        task_config.pfCallback = &CallbackProc;
+                        task_config.lpCallbackData = reinterpret_cast<LONG_PTR>(&state);
+                        //Two notifications only ever arrive if their flag is on, so asking for the handler is
+                        //taken as asking for the flag.
+                        if (cfg.callbacks.on_timer) task_config.dwFlags |= TDF_CALLBACK_TIMER;
+                        if (cfg.callbacks.on_hyperlink_clicked) task_config.dwFlags |= TDF_ENABLE_HYPERLINKS;
+                    }
+
+                    int pressed = 0;
+                    int radio_id = 0;
+                    BOOL verified = FALSE;
+                    //Null out-params for controls that were never configured, which keeps the optionals below honest.
+                    res.res = TaskDialogIndirect(&task_config, &pressed,
+                        radios.empty() ? nullptr : &radio_id,
+                        cfg.verification_text ? &verified : nullptr);
+                    //A handler that threw took the dialog down with it, so whatever the out-params say is the
+                    //result of that teardown rather than a real answer.
+                    if (state.failure)
+                    {
+                        std::rethrow_exception(state.failure);
+                    }
+                    if (FAILED(res.res))
+                    {
+                        return res;
+                    }
+                    //Esc and the X report IDCANCEL even when no Cancel button was configured, so a Cancel here
+                    //does not imply the caller asked for one.
+                    if (const auto common = IdToCommonButton(pressed))
+                    {
+                        res.button = common.value();
+                    }
+                    else
+                    {
+                        res.button = static_cast<TaskDialogButtons>(pressed);
+                    }
+                    if (!radios.empty())
+                    {
+                        res.radio = static_cast<TaskDialogRadios>(radio_id);
+                    }
+                    if (cfg.verification_text)
+                    {
+                        res.verification = (verified != FALSE);
+                    }
+                    return res;
+                }
+                TaskDialogConfig<TaskDialogButtons, TaskDialogRadios>& Configuration() noexcept { return cfg; }
+                const TaskDialogConfig<TaskDialogButtons, TaskDialogRadios>& Configuration() const noexcept { return cfg; }
+            private:
+                //What the dialog carries in lpCallbackData for us: the handlers to dispatch to, and a place to
+                //park an exception that cannot be thrown where it happened.
+                struct CallbackState
+                {
+                    const TaskDialogCallbacks<TaskDialogButtons, TaskDialogRadios>* callbacks = nullptr;
+                    std::exception_ptr failure;
+                };
+                //Throwing across TaskDialogIndirect would unwind straight through comctl32, so a handler that
+                //throws instead ends the dialog here and its exception comes back out of Create().
+                static HRESULT CALLBACK CallbackProc(HWND hwnd, UINT notification, WPARAM wparam, LPARAM lparam,
+                    LONG_PTR ref_data) noexcept
+                {
+                    auto& state = *reinterpret_cast<CallbackState*>(ref_data);
+                    //Notifications keep coming while the dialog tears itself down; none of them may run a
+                    //handler again or overwrite the exception already on its way out.
+                    if (state.failure) { return S_OK; }
+                    const auto& callbacks = *state.callbacks;
+                    const TaskDialogView<TaskDialogButtons, TaskDialogRadios> window{ hwnd };
+                    try
+                    {
+                        if (callbacks.on_notification)
+                        {
+                            if (const auto handled = callbacks.on_notification(window, notification, wparam, lparam))
+                            {
+                                return handled.value();
+                            }
+                        }
+                        switch (notification)
+                        {
+                        case TDN_CREATED:
+                            if (callbacks.on_created) { callbacks.on_created(window); }
+                            break;
+                        case TDN_DIALOG_CONSTRUCTED:
+                            if (callbacks.on_dialog_constructed) { callbacks.on_dialog_constructed(window); }
+                            break;
+                        case TDN_NAVIGATED:
+                            if (callbacks.on_navigated) { callbacks.on_navigated(window); }
+                            break;
+                        case TDN_BUTTON_CLICKED:
+                            if (callbacks.on_button_clicked)
+                            {
+                                const int id = static_cast<int>(wparam);
+                                //Same split as the response: Esc and the X come through as IDCANCEL whether or
+                                //not a Cancel button exists.
+                                std::variant<CommonButtons, TaskDialogButtons> button{ static_cast<TaskDialogButtons>(id) };
+                                if (const auto common = IdToCommonButton(id)) { button = common.value(); }
+                                //S_FALSE is what tells the dialog to stay up.
+                                if (callbacks.on_button_clicked(window, button) == ButtonAction::KeepOpen)
+                                {
+                                    return S_FALSE;
+                                }
+                            }
+                            break;
+                        case TDN_RADIO_BUTTON_CLICKED:
+                            if (callbacks.on_radio_clicked)
+                            {
+                                callbacks.on_radio_clicked(window, static_cast<TaskDialogRadios>(static_cast<int>(wparam)));
+                            }
+                            break;
+                        case TDN_VERIFICATION_CLICKED:
+                            if (callbacks.on_verification_clicked) { callbacks.on_verification_clicked(window, wparam != 0); }
+                            break;
+                        case TDN_EXPANDO_BUTTON_CLICKED:
+                            if (callbacks.on_expando_clicked) { callbacks.on_expando_clicked(window, wparam != 0); }
+                            break;
+                        case TDN_HYPERLINK_CLICKED:
+                            if (callbacks.on_hyperlink_clicked)
+                            {
+                                const auto* href = reinterpret_cast<PCWSTR>(lparam);
+                                callbacks.on_hyperlink_clicked(window, href ? std::wstring_view{ href } : std::wstring_view{});
+                            }
+                            break;
+                        case TDN_TIMER:
+                            //wparam counts milliseconds; S_FALSE puts it back to zero for the next tick.
+                            if (callbacks.on_timer &&
+                                callbacks.on_timer(window, std::chrono::milliseconds{ static_cast<DWORD>(wparam) })
+                                    == TimerAction::ResetTickCount)
+                            {
+                                return S_FALSE;
+                            }
+                            break;
+                        case TDN_HELP:
+                            if (callbacks.on_help) { callbacks.on_help(window); }
+                            break;
+                        case TDN_DESTROYED:
+                            if (callbacks.on_destroyed) { callbacks.on_destroyed(window); }
+                            break;
+                        default:
+                            break;
+                        }
+                    }
+                    catch (...)
+                    {
+                        state.failure = std::current_exception();
+                        //IDCANCEL closes the dialog even without a Cancel button. Not from TDN_DESTROYED,
+                        //where the window is already going away and the click would have nowhere to land.
+                        if (notification != TDN_DESTROYED)
+                        {
+                            SendMessageW(hwnd, TDM_CLICK_BUTTON, IDCANCEL, 0);
+                        }
+                    }
+                    return S_OK;
+                }
+                TaskDialogConfig<TaskDialogButtons, TaskDialogRadios> cfg;
+            };
+        }//end namespace TaskDialog export portion
         namespace literals {
             WPARAM operator"" _wp(WPARAM w) { return w; }
             LPARAM operator"" _lp(unsigned long long l) { return static_cast<LPARAM>(l); }
@@ -1401,7 +1986,6 @@ namespace Win64Wrapper {
             StatusBar,
             SysLink,//text is the text of the link
             Tab, //parent window must have WS_CLIPSIBILINGS style
-            //            TaskDialog,
             Toolbar,//creates empty toolbar, see documentation for messages to send to add buttons
             //            Tooltip,
             Trackbar,
@@ -1479,11 +2063,15 @@ namespace Win64Wrapper {
                 }
             }
         }
-        long long CreateModalDiagBox(HINSTANCE hinst, const std::wstring& template_name, DLGPROC callback = nullptr, HWND parent = nullptr, LPARAM linit = 0) {
-            return DialogBoxParam(hinst, template_name.c_str(), parent, callback, linit);
+        long long CreateModalDiagBox(HINSTANCE hinst, const wchar_t* template_id, DLGPROC callback = nullptr, HWND parent = nullptr, LPARAM linit = 0) {
+            return DialogBoxParam(hinst, template_id, parent, callback, linit);
         }
         long long CreateModalDiagBox(HINSTANCE hinst, const int template_id, DLGPROC callback = nullptr, HWND parent = nullptr, LPARAM linit = 0) {
             return CreateModalDiagBox(hinst, MAKEINTRESOURCE(template_id), callback, parent, linit);
+        }
+        //for the templates named by a string rather than by an id
+        long long CreateModalDiagBox(HINSTANCE hinst, const std::wstring& template_name, DLGPROC callback = nullptr, HWND parent = nullptr, LPARAM linit = 0) {
+            return CreateModalDiagBox(hinst, template_name.c_str(), callback, parent, linit);
         }
         //returns default file path for sys config files for the app, optionally append a filename to the end
         //Use GetTempData to get temp folder, not SHGetKnownFolderPath
