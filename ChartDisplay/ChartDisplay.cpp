@@ -587,7 +587,7 @@ void ShowAboutBox(HWND hwnd) {
 		airac += L"N/A";
 	}
 	Win64Wrapper::CreateMessageBox(
-		std::format(L"FAA Chart Display\nVersion {}.{}.{}\n\n{}\n\nCopyright (C) 2025-2026 Matthew Moran\nLicensed under the GNU GPL v3.\n\n"
+		std::format(L"US Chart Display\nVersion {}.{}.{}\n\n{}\n\nCopyright (C) 2025-2026 Matthew Moran\nLicensed under the GNU GPL v3.\n\n"
 			"For flight simulation use only. Not for real world use.",
 			CD_VER_MAJOR, CD_VER_MINOR, CD_VER_PATCH, airac),
 		L"About ChartDisplay", hwnd, MessageBoxStyles::Ok, MessageBoxStyles::DefaultButton1, MessageBoxStyles::IconInformation);
@@ -629,7 +629,7 @@ int wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int
 	Win64Wrapper::WindowSize sz{ 1623,933 }; //old size 831x595
 	Win64Wrapper::WindowStyles wstyle;
 	wstyle.extended_styles = WS_EX_APPWINDOW;
-	auto window_title = std::format(L"FAA Chart Display {}.{}.{}", CD_VER_MAJOR, CD_VER_MINOR, CD_VER_PATCH);
+	auto window_title = std::format(L"US Chart Display {}.{}.{}", CD_VER_MAJOR, CD_VER_MINOR, CD_VER_PATCH);
 	Win64Wrapper::Window win(wc, &ExtraWindowProc, sz, window_title, true, Win64Wrapper::WindowLogger(L"log.txt"),wstyle);
 	auto res=win.DisplayWindow();
 	if (res == false) {
