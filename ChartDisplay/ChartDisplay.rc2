@@ -1,0 +1,52 @@
+//
+// ChartDisplay.rc2 - resources Microsoft Visual C++ does not edit directly
+//
+// Version information from version.h. This is included in the resource file under
+// TEXTINCLUDE// #ifndef APSTUDIO_INVOKED so it is not touched by the Visual Studio resource editor
+// otherwise, modifying resources would eliminate the entire version info in place of
+// hard numbers.
+//
+#ifdef APSTUDIO_INVOKED
+#error this file is not editable by Microsoft Visual C++
+#endif
+
+#include "version.h"
+#include "winres.h"
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// Version
+//
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION CD_VER_MAJOR,CD_VER_MINOR,CD_VER_PATCH,CD_VER_BUILD
+ PRODUCTVERSION CD_VER_MAJOR,CD_VER_MINOR,CD_VER_PATCH,CD_VER_BUILD
+ FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+ FILEFLAGS 0x1L
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "Matthew Moran"
+            VALUE "FileDescription", "US Chart Display for VATSIM Controllers"
+            VALUE "FileVersion", CD_VERSION_STRING
+            VALUE "InternalName", "ChartDisplay.exe"
+            VALUE "LegalCopyright", "Copyright (C) 2025-2026 Matthew Moran. GPL-3.0-or-later."
+            VALUE "OriginalFilename", "ChartDisplay.exe"
+            VALUE "ProductName", "ChartDisplay"
+            VALUE "ProductVersion", CD_VERSION_STRING
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
