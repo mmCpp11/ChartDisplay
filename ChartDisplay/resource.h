@@ -2,11 +2,7 @@
 // Microsoft Visual C++ generated include file.
 // Used by ChartDisplay.rc
 //
-#define CD_VER_PATCH                    0
-#define CD_VER_BUILD                    0
 #define IDC_MYICON                      2
-#define CD_VER_MINOR                    2
-#define CD_VER_MAJOR                    3
 #define IDD_CUSTCHART                   101
 #define IDD_CHARTDISPLAY_DIALOG         102
 #define IDS_APP_TITLE                   103
