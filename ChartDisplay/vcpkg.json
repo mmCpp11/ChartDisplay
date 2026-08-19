@@ -4,7 +4,8 @@
   "description": "Displays FAA Charts per ARTCC",
   "dependencies": [
     "libzip",
-	"sqlite-orm",
-	"pugixml"
+    "pugixml",
+    "sqlite-orm",
+    "wil"
   ]
 }

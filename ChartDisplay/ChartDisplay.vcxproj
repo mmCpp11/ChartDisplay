@@ -45,6 +45,12 @@
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Label="Vcpkg">
     <VcpkgEnableManifest>true</VcpkgEnableManifest>
+    <VcpkgEnabled>true</VcpkgEnabled>
+    <VcpkgManifestInstall>true</VcpkgManifestInstall>
+    <!-- Without this, the MSBuild integration appends the triplet twice
+         (vcpkg_installed\x64-windows\x64-windows\) and diverges from the layout
+         CLI "vcpkg install" produces. -->
+    <VcpkgInstalledDir>$(MSBuildProjectDirectory)\vcpkg_installed\</VcpkgInstalledDir>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
