@@ -6,7 +6,7 @@
 
 // Program version: Bump these when releasing.
 #define CD_VER_MAJOR 3
-#define CD_VER_MINOR 2
+#define CD_VER_MINOR 3
 #define CD_VER_PATCH 0
 #define CD_VER_BUILD 0
 
