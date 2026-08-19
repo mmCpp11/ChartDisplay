@@ -25,6 +25,8 @@ module;
 #include <windows.h>
 #include <winhttp.h>
 #include <bcrypt.h>
+//must follow bcrypt.h
+#include <wil/resource.h>
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "bcrypt.lib")
 
@@ -37,16 +39,8 @@ namespace Win64Wrapper
     {
         namespace
         {
-            //RAII for WinHTTP HINTERNET handles
-            struct WinHttpHandleDeleter
-            {
-                void operator()(HINTERNET h) const noexcept
-                {
-                    if (h) WinHttpCloseHandle(h);
-                }
-            };
-
-            using HInternet = std::unique_ptr<std::remove_pointer_t<HINTERNET>, WinHttpHandleDeleter>;
+            //RAII for WinHTTP HINTERNET handles.
+            using HInternet = wil::unique_winhttp_hinternet;
         }
 
         export struct DownloadResult
@@ -229,16 +223,9 @@ namespace Win64Wrapper
             return HttpGet(url, std::nullopt, nullptr, true, {});
         }
 
-        //RAII for a Win32 file handle. INVALID_HANDLE_VALUE is never stored
-        export struct FileHandleDeleter
-        {
-            void operator()(HANDLE h) const noexcept
-            {
-                if (h && h != INVALID_HANDLE_VALUE) CloseHandle(h);
-            }
-        };
-
-        export using FileHandle = std::unique_ptr<std::remove_pointer_t<HANDLE>, FileHandleDeleter>;
+        //RAII for a Win32 file handle. unique_hfile is unique_any_handle_invalid, so its empty state is
+        //INVALID_HANDLE_VALUE rather than null
+        export using FileHandle = wil::unique_hfile;
 
         export struct VerifyResult
         {
@@ -253,24 +240,12 @@ namespace Win64Wrapper
 
         namespace
         {
-            struct BCryptAlgDeleter
-            {
-                void operator()(BCRYPT_ALG_HANDLE h) const noexcept { if (h) BCryptCloseAlgorithmProvider(h, 0); }
-            };
-
-            struct BCryptHashDeleter
-            {
-                void operator()(BCRYPT_HASH_HANDLE h) const noexcept { if (h) BCryptDestroyHash(h); }
-            };
-
-            struct BCryptKeyDeleter
-            {
-                void operator()(BCRYPT_KEY_HANDLE h) const noexcept { if (h) BCryptDestroyKey(h); }
-            };
-
-            using AlgHandle = std::unique_ptr<std::remove_pointer_t<BCRYPT_ALG_HANDLE>, BCryptAlgDeleter>;
-            using HashHandle = std::unique_ptr<std::remove_pointer_t<BCRYPT_HASH_HANDLE>, BCryptHashDeleter>;
-            using KeyHandle = std::unique_ptr<std::remove_pointer_t<BCRYPT_KEY_HANDLE>, BCryptKeyDeleter>;
+            //unique_bcrypt_algorithm closes via BCryptCloseAlgorithmProviderNoFlags, which supplies the
+            //flags argument CNG requires. unique_any skips the closer on a null handle, so the null
+            //checks the hand-written deleters did are already covered.
+            using AlgHandle = wil::unique_bcrypt_algorithm;
+            using HashHandle = wil::unique_bcrypt_hash;
+            using KeyHandle = wil::unique_bcrypt_key;
 
             //NTSTATUS reports success opposite of HRESULT. To avoid an annoying include,
             //extract necessary machinery here
@@ -313,14 +288,10 @@ namespace Win64Wrapper
             bool HashFile(HANDLE file, std::vector<UCHAR>& digest, std::wstring& error)
             {
                 AlgHandle alg;
+                if (!NtOk(BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, 0)))
                 {
-                    BCRYPT_ALG_HANDLE raw = nullptr;
-                    if (!NtOk(BCryptOpenAlgorithmProvider(&raw, BCRYPT_SHA256_ALGORITHM, nullptr, 0)))
-                    {
-                        error = L"BCryptOpenAlgorithmProvider(SHA256) failed";
-                        return false;
-                    }
-                    alg.reset(raw);
+                    error = L"BCryptOpenAlgorithmProvider(SHA256) failed";
+                    return false;
                 }
                 DWORD hash_len = 0;
                 DWORD copied = 0;
@@ -332,15 +303,11 @@ namespace Win64Wrapper
                 }
                 digest.assign(hash_len, 0);
                 HashHandle hash;
+                //A null hash-object buffer asks CNG to allocate one itself (Windows 8 and later).
+                if (!NtOk(BCryptCreateHash(alg.get(), &hash, nullptr, 0, nullptr, 0, 0)))
                 {
-                    BCRYPT_HASH_HANDLE raw = nullptr;
-                    //A null hash-object buffer asks CNG to allocate one itself (Windows 8 and later).
-                    if (!NtOk(BCryptCreateHash(alg.get(), &raw, nullptr, 0, nullptr, 0, 0)))
-                    {
-                        error = L"BCryptCreateHash failed";
-                        return false;
-                    }
-                    hash.reset(raw);
+                    error = L"BCryptCreateHash failed";
+                    return false;
                 }
                 //The handle is the caller's, so its file pointer is not assumed to be at the start.
                 if (LARGE_INTEGER origin{}; !SetFilePointerEx(file, origin, nullptr, FILE_BEGIN))
@@ -382,13 +349,9 @@ namespace Win64Wrapper
             VerifyResult result;
             //FILE_SHARE_READ alone: for as long as this handle lives nothing else can write to or delete the
             //file, which is what keeps the answer true through to the moment the caller launches it.
-            FileHandle target;
-            if (HANDLE raw = CreateFileW(file.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
-                                         FILE_ATTRIBUTE_NORMAL, nullptr); raw != INVALID_HANDLE_VALUE)
-            {
-                target.reset(raw);
-            }
-            else
+            FileHandle target(CreateFileW(file.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                                          FILE_ATTRIBUTE_NORMAL, nullptr));
+            if (!target)
             {
                 result.error = L"Unable to open the file for verification";
                 return result;
@@ -402,27 +365,19 @@ namespace Win64Wrapper
             if (!HashFile(target.get(), digest, result.error)) return result;
 
             AlgHandle rsa;
+            if (!NtOk(BCryptOpenAlgorithmProvider(&rsa, BCRYPT_RSA_ALGORITHM, nullptr, 0)))
             {
-                BCRYPT_ALG_HANDLE raw = nullptr;
-                if (!NtOk(BCryptOpenAlgorithmProvider(&raw, BCRYPT_RSA_ALGORITHM, nullptr, 0)))
-                {
-                    result.error = L"BCryptOpenAlgorithmProvider(RSA) failed";
-                    return result;
-                }
-                rsa.reset(raw);
+                result.error = L"BCryptOpenAlgorithmProvider(RSA) failed";
+                return result;
             }
             KeyHandle key;
+            //The blob is read only
+            if (!NtOk(BCryptImportKeyPair(rsa.get(), nullptr, BCRYPT_RSAPUBLIC_BLOB, &key,
+                                          const_cast<PUCHAR>(public_key_blob.data()),
+                                          static_cast<ULONG>(public_key_blob.size()), 0)))
             {
-                BCRYPT_KEY_HANDLE raw = nullptr;
-                //The blob is read only
-                if (!NtOk(BCryptImportKeyPair(rsa.get(), nullptr, BCRYPT_RSAPUBLIC_BLOB, &raw,
-                                              const_cast<PUCHAR>(public_key_blob.data()),
-                                              static_cast<ULONG>(public_key_blob.size()), 0)))
-                {
-                    result.error = L"BCryptImportKeyPair failed: the public key blob is not a BCRYPT_RSAKEY_BLOB";
-                    return result;
-                }
-                key.reset(raw);
+                result.error = L"BCryptImportKeyPair failed: the public key blob is not a BCRYPT_RSAKEY_BLOB";
+                return result;
             }
             BCRYPT_PKCS1_PADDING_INFO padding{ BCRYPT_SHA256_ALGORITHM };
             const NTSTATUS verified = BCryptVerifySignature(key.get(), &padding, digest.data(),
