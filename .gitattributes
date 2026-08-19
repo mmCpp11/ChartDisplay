@@ -3,6 +3,10 @@
 ###############################################################################
 * text=auto
 
+# Shell scripts are run from WSL. Left to text=auto they would be checked out with
+# CRLF on Windows, and bash then fails on the shebang with "bad interpreter".
+*.sh text eol=lf
+
 ###############################################################################
 # Set default behavior for command prompt diff.
 #
