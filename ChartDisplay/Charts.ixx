@@ -126,6 +126,10 @@ namespace charts {
 	export using UpdateReporter = std::function<void(const UpdateStatus&)>;
 	//What kind of update the current DB state calls for (computed without side effects).
 	export enum class UpdateNeed { None, Initial, AutoupdateStale };
+	//Set once from the command line (--profile) before any worker starts, so no synchronisation is
+	//needed. When true, GetChartsAndOrganize appends per-phase timings to profile.log next to the
+	//downloaded zips. Off by default: the timings are only useful when someone is measuring.
+	export inline bool profiling_enabled = false;
 	bool DoDownload(const std::filesystem::path& outpath, std::chrono::year_month_day airacdate,
 		const UpdateReporter& report = {}, std::stop_token st = {});
 	//Preflight: probes the FAA to see whether this cycle's files have been published, without downloading.
@@ -328,7 +332,9 @@ namespace charts {
 		AiracDates current_cycle;
 		//tempdir: path to temp directory nasr data is downloaded to. Adds NASR data to database and then charts
 		void GetChartsAndOrganize(const std::filesystem::path& tempdir);
-		void CleanCharts(const std::filesystem::path& tempdir,bool keep_temp=false);
+		//Returns the old chart tree, renamed aside for the caller to delete once extraction is done.
+		//Empty if there was nothing to move (first run, or the rename failed and it was removed in place).
+		[[nodiscard]] std::filesystem::path CleanCharts(const std::filesystem::path& tempdir,bool keep_temp=false);
 		void ParseManualCharts();
 	};
 }

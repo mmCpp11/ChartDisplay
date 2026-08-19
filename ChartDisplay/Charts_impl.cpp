@@ -277,11 +277,11 @@ namespace sqlite_orm {
 }
 
 namespace charts {
-	//starts Download.exe process. For airac_dates, outpath must be the path to the temporary xml file
-	//for charts, outpath must be a path to the directory to download the files to, usually tempdir\ChartDisplay
-	//Build the set of FAA download URLs for a cycle. Centralized so DoDownload and CheckCycleAvailability
-	//(and any future change to the FAA's URL scheme) stay in agreement.
 	namespace {
+		constexpr std::size_t kDownloadStreams = 2;
+		//Pacing between consecutive files taken by the same worker.
+		constexpr auto kInterFileDelay = std::chrono::seconds{ 2 };
+
 		std::vector<std::wstring> CycleUrls(std::chrono::year_month_day airacdate) {
 			auto nasr_date = std::format(L"{:%d_%b_%Y}", airacdate);
 			const std::wstring nasr_base = L"https://nfdc.faa.gov/webContent/28DaySub/extra/";
@@ -314,24 +314,60 @@ namespace charts {
 			outpath / "APT_CSV.zip", outpath / "CLS_CSV.zip",
 			outpath / "TPPA.zip", outpath / "TPPB.zip", outpath / "TPPC.zip", outpath / "TPPD.zip", outpath / "TPPE.zip"
 		};
-		for (std::size_t i = 0; i < urls.size(); ++i) {
-			if (st.stop_requested()) return false; //canceled between files
-			if (report) report({ UpdatePhase::Downloading, static_cast<int>(i + 1),
-				static_cast<int>(urls.size()), destinations[i].filename().wstring() });
-			//Per-file byte callback exists only to honor cancellation mid-stream (these are large files).
-			auto res = Net::HttpDownloadToFile(urls[i], destinations[i],
-				[&st](unsigned long long, unsigned long long) { return !st.stop_requested(); });
-			if (st.stop_requested()) return false; //user canceled: not a real failure, so no error box
-			if (!res) {
-				std::wstring detail = res.transport_ok ? std::format(L"HTTP {}", res.status_code) : res.error;
-				Win64Wrapper::CreateMessageBox(std::format(L"Failed to download:\n{}\n({})", urls[i], detail), L"Download Failure");
-				return false;
+		const int total = static_cast<int>(urls.size());
+		//Workers pull the next file. Each HttpGet opens its own WinHTTP session.
+		std::atomic<std::size_t> next_index{ 0 };
+		std::atomic<int> completed{ 0 };
+		std::atomic<bool> failed{ false };
+		std::mutex error_mtx;
+		std::wstring error_url, error_detail;   //first failure wins; reported once after the workers join
+
+		auto worker = [&] {
+			bool took_one = false;
+			for (;;) {
+				if (st.stop_requested() || failed.load()) return;
+				const std::size_t i = next_index.fetch_add(1);
+				if (i >= urls.size()) return;
+				//Paces this worker between its own files.
+				if (took_one) std::this_thread::sleep_for(kInterFileDelay);
+				took_one = true;
+				if (st.stop_requested() || failed.load()) return;
+				//file_index is the completed count, so the bar never runs ahead of real progress even
+				//though two transfers are in flight; file_name is the one just starting.
+				if (report) report({ UpdatePhase::Downloading, completed.load(), total,
+					destinations[i].filename().wstring() });
+				//Per-file byte callback exists to honor cancellation mid-stream (these are large files)
+				//and to abandon the other stream promptly once one has failed.
+				auto res = Net::HttpDownloadToFile(urls[i], destinations[i],
+					[&](unsigned long long, unsigned long long) {
+						return !st.stop_requested() && !failed.load();
+					});
+				if (st.stop_requested()) return; //user canceled: not a real failure, so no error box
+				if (!res) {
+					std::scoped_lock lk(error_mtx);
+					if (!failed.exchange(true)) {   //only the first failure is kept and reported
+						error_url = urls[i];
+						error_detail = res.transport_ok ? std::format(L"HTTP {}", res.status_code) : res.error;
+					}
+					return;
+				}
+				completed.fetch_add(1);
 			}
-			//brief pause between the large TPP volumes to be polite to the FAA servers
-			if (i >= 2) {
-				std::this_thread::sleep_for(10s);
-			}
+		};
+
+		{
+			std::vector<std::jthread> streams;
+			streams.reserve(kDownloadStreams);
+			for (std::size_t s = 0; s < kDownloadStreams; ++s) streams.emplace_back(worker);
 		}
+
+		if (st.stop_requested()) return false;
+		if (failed.load()) {
+			Win64Wrapper::CreateMessageBox(std::format(L"Failed to download:\n{}\n({})", error_url, error_detail),
+				L"Download Failure");
+			return false;
+		}
+		if (report) report({ UpdatePhase::Downloading, total, total, destinations.back().filename().wstring() });
 		return true;
 	}
 
@@ -723,16 +759,47 @@ namespace charts {
 		GetChartsAndOrganize(tempdir);
 		return true;
 	}
-
-	using ZipError = std::unique_ptr < zip_error_t, decltype([](zip_error_t* err) {zip_error_fini(err);}) > ;
 	using ZipArchive = std::unique_ptr < zip_t, decltype([](zip_t* ar) {zip_close(ar);}) > ;
 	using ZipContainedFile = std::unique_ptr < zip_file_t, decltype([](zip_file_t* zf) {zip_fclose(zf);}) > ;
 
-	void FAAChartProcessor::GetChartsAndOrganize(const std::filesystem::path& tempdir) {
+	void FAAChartProcessor::GetChartsAndOrganize(const std::filesystem::path& tempdir)
+	{
 		//Regenerate the organized chart tree from scratch. Deferred to here (rather than before the
 		//download) so a failed or unpublished download leaves the user's existing charts intact.
 		//keep_temp=true preserves the downloaded zips for the no-download reload path.
-		CleanCharts(tempdir, true);
+
+		//Per-phase timings, appended to profile.log beside the downloaded zips when --profile is given.
+		//The marks are always collected (six clock reads is nothing next to a 45s phase); only the write
+		//is gated, so enabling the flag needs no other bookkeeping. Written from a destructor so an
+		//exception mid-organize still leaves whatever was measured up to that point.
+		using prof_clock = std::chrono::steady_clock;
+		std::vector<std::pair<std::string, long long>> prof_marks;
+		auto prof_last = prof_clock::now();
+		auto prof_mark = [&](std::string what) {
+			const auto now = prof_clock::now();
+			prof_marks.emplace_back(std::move(what),
+				std::chrono::duration_cast<std::chrono::milliseconds>(now - prof_last).count());
+			prof_last = now;
+		};
+		struct ProfWriter {
+			fs::path path;
+			const std::vector<std::pair<std::string, long long>>& marks;
+			~ProfWriter() {
+				if (!profiling_enabled) return;
+				std::ofstream out(path, std::ios::app);
+				if (!out) return;
+				long long total = 0;
+				out << "--- GetChartsAndOrganize ---\n";
+				for (const auto& [what, ms] : marks) {
+					out << std::format("{:<38}{:>8} ms\n", what, ms);
+					total += ms;
+				}
+				out << std::format("{:<38}{:>8} ms\n", "TOTAL", total);
+			}
+		} prof_writer{ tempdir / "profile.log", prof_marks };   //destroyed before prof_marks
+
+		auto stale_tree = CleanCharts(tempdir, true);
+		prof_mark("CleanCharts (rename aside)");
 
 		std::array<std::pair<fs::path, std::string>, 2> zipfns = { std::make_pair(tempdir / "APT_CSV.zip","APT_BASE.csv"),
 			std::make_pair(tempdir / "CLS_CSV.zip","CLS_ARSP.csv") };
@@ -748,11 +815,10 @@ namespace charts {
 			auto& [fn,name] = fileinfo;
 			ZipArchive archive(zip_open(fn.string().c_str(), ZIP_RDONLY, &errcode));
 			zip_error_t ze;
-			ZipError zerror;
 			if (errcode != ZIP_ER_OK) {
 				zip_error_init_with_code(&ze, errcode);
-				zerror.reset(std::move(&ze));
-				std::println("Cannot open zip archive: {} with error: {}", fn.string(), zip_error_strerror(zerror.get()));
+				OutputDebugStringA(std::format("Cannot open zip archive: {} with error: {}", fn.string(), zip_error_strerror(&ze)).c_str());
+				zip_error_fini(&ze);
 				return false;
 			}
 			struct zip_stat st;
@@ -783,13 +849,14 @@ namespace charts {
 			std::istringstream iraw(std::move(zip_file_raw));
 			csvs.emplace_back(iraw, cfmt);
 			return true;
-			};
+		};
 		for (auto& i : zipfns) {
 			auto ret = getzip(i);
 			if (!ret) {
 				throw NoDataException("Unable to parse NASR zip files");
 			}
 		}
+		prof_mark("CSV zips: open + parse");
 		//populate the AirportRecords from the parsed CSV
 		std::string allowable;
 		int count = 0;
@@ -837,41 +904,15 @@ namespace charts {
 				airspace = 'B';
 			}
 			if (airspace != 'E') {
-				//Use find, not at: an airport can appear in CLS_ARSP without being in recmap (e.g. its
-				//RESP_ARTCC is outside the allowable set, or it isn't in APT_BASE). at() would throw and
-				//abort the entire chart update mid-write. Skip anything we don't already track.
 				if (auto it = recmap.find(row["ARPT_ID"].get<std::string>()); it != recmap.end()) {
 					it->second.airspace_class = airspace;
 				}
 			}
 		}
 
-		//add manual AirportRecords for fictional airports/closed airports if necessary and do all checks here
-		//if (!manual_additions.empty()) {
-		//	for (auto& m : manual_additions) {
-		//		if (!recmap.contains(m.airport_id)) {
-		//			auto aid = m.airport_id;
-		//			AirportRecord ar;
-		//			ar.artcc = m.artcc;
-		//			ar.airport_id = aid;
-		//			ar.useradded = true;
-		//			ar.has_charts = true;
-		//			if (auto it = std::ranges::find_if(manual_higher_class_additions, [&aid](const std::pair<std::string, char>& mc) {
-		//				if (mc.first == aid) return true;
-		//				else return false;
-		//				});it != manual_higher_class_additions.end()) {
-		//				ar.airspace_class = it->second;
-		//			}
-		//			if (Win64Wrapper::windows_reserved_names.contains(aid)) {
-		//				ar.airport_id_filestring = std::format("{}X", aid);
-		//			}
-		//			recmap.try_emplace(std::move(aid), std::move(ar));
-		//		}
-		//	}
-		//}
-
 		auto vmap = std::views::values(recmap); //get a view of all the AirportRecords for adding to the database later
 
+		prof_mark("AirportRecords + class fixes");
 		//Charts
 		std::array < fs::path, 4 > zip_paths{ tempdir / "TPPA.zip",tempdir / "TPPB.zip", tempdir / "TPPC.zip",tempdir / "TPPD.zip" };
 		//parse the XML Metafile, input is a std::string for the buffer (all data here will be overwritten so preferably an empty string
@@ -879,24 +920,23 @@ namespace charts {
 			auto xmlzippath = tempdir / "TPPE.zip";
 			std::string xmlfn = "d-TPP_Metafile.xml";
 			zip_error_t ze;
-			ZipError zerror;
 			int errcode = {};
 			ZipArchive xzar(zip_open(xmlzippath.string().c_str(), ZIP_RDONLY, &errcode));
 			if (errcode != ZIP_ER_OK) {
 				zip_error_init_with_code(&ze, errcode);
-				zerror.reset(std::move(&ze));
-				std::println("Cannot open zip archive: {} with error: {}", xmlfn, zip_error_strerror(zerror.get()));
+				OutputDebugStringA(std::format("Cannot open zip archive: {} with error: {}", xmlfn, zip_error_strerror(&ze)).c_str());
+				zip_error_fini(&ze);
 				return std::unexpected(false);
 			}
 			struct zip_stat st;
 			zip_stat_init(&st);
 			if (zip_stat(xzar.get(), xmlfn.c_str(), 0, &st) < 0) {
-				std::println("Unable to open {}", xmlfn);
+				OutputDebugStringA(std::format("Unable to open {}", xmlfn).c_str());
 				return std::unexpected(false);
 			}
 			ZipContainedFile zfile(zip_fopen(xzar.get(), xmlfn.c_str(), 0));
 			if (!zfile) {
-				std::println("Cannot open file in zip archive: {}", xmlfn);
+				OutputDebugStringA(std::format("Cannot open file in zip archive: {}", xmlfn).c_str());
 				return std::unexpected(false);
 			}
 			xmlfilebuffer.clear();
@@ -982,75 +1022,129 @@ namespace charts {
 		//if (!manual_additions.empty()) {
 		//	charts_to_add.append_range(std::move(manual_additions));
 		//}
+		prof_mark("XML metafile parse + chart list");
 		//copy charts from zip files to dirs
 		std::array<ZipArchive, 4> tppzip;
 		zip_error_t ze;
-		ZipError zerror;
+		struct file_zip_attributes
+		{
+			int archive;
+			zip_uint64_t index;
+			zip_uint64_t filesize;
+		};
+		std::unordered_map<std::string, file_zip_attributes> zip_map;
 		for (int tz = 0;tz < 4; ++tz) {
 			int err_zip_code = {};
 			tppzip[tz].reset(zip_open(zip_paths[tz].string().c_str(), ZIP_RDONLY, &err_zip_code));
 			if (err_zip_code != ZIP_ER_OK) {
 				zip_error_init_with_code(&ze, err_zip_code);
-				zerror.reset(std::move(&ze));
-				std::println("Cannot open zip archive: {} with error: {}", zip_paths[tz].filename().string(), zip_error_strerror(zerror.get()));
+				OutputDebugStringA(std::format("Cannot open zip archive: {} with error: {}", zip_paths[tz].filename().string(), zip_error_strerror(&ze)).c_str());
+				zip_error_fini(&ze);
 				throw NoDataException("TPP Zip open error.");
 			}
+			const auto entries = zip_get_num_entries(tppzip[tz].get(), 0);
+			zip_map.reserve(zip_map.size() + static_cast<size_t>(entries));
+			for (zip_int64_t i = 0; i < entries; ++i) {
+				zip_stat_t st;
+				zip_stat_init(&st);
+				if (zip_stat_index(tppzip[tz].get(), i, 0, &st) < 0) {
+					auto staterr = zip_get_error(tppzip[tz].get());
+					OutputDebugStringA(std::format("Cannot stat zip entry {} with error: {}", i, zip_error_strerror(staterr)).c_str());
+					continue;
+				}
+				zip_uint64_t validflags = ZIP_STAT_NAME | ZIP_STAT_INDEX | ZIP_STAT_SIZE;
+				if ((st.valid & validflags) != validflags)
+				{
+					OutputDebugStringA(std::format("Stat flags invalid for {}", i).c_str());
+					continue;
+				}
+				//there are no collisions in the data, so we can use emplace
+				zip_map.emplace(st.name, file_zip_attributes{tz, st.index, st.size});
+			}
 		}
+		//Classify first, extract second. Group by source archive.
+		struct extract_job {
+			const ChartRecord* rec;
+			zip_uint64_t index;
+			zip_uint64_t filesize;
+		};
+		std::array<std::vector<extract_job>, 4> work;
 		std::vector<std::pair<std::string,std::string>> bugfix_remove;
 		for (auto& c : charts_to_add) {
-			//if (c.useradded) {
-			//	//manual charts aren't in zips
-			//	auto newfp = chartdir / artcc_names_map.at(c.artcc) / c.airport_id / c.chartpath.filename();
-			//	std::error_code ec;
-			//	fs::create_directories(newfp.parent_path());
-			//	fs::copy_file(c.chartpath, newfp,fs::copy_options::overwrite_existing,ec);
-			//	if (!ec) {
-			//		c.chartpath = std::move(newfp); //update chartpath to new path now that the copy has been made
-			//	}
-			//}
-			//else {
 			if (c.airport_id == "JFK" && c.procedure_name == "PAWLING TWO") {
 				bugfix_remove.push_back(std::make_pair(c.airport_id, c.procedure_name));
 				continue;
 			}
-			for (auto& tz : tppzip) {
-				//first find if this is the correct archive
-				auto cfilename = c.chartpath.filename().string();
-				auto pos = zip_name_locate(tz.get(), cfilename.c_str(), 0);
-				if (pos != -1) {//found the file
-					struct zip_stat st;
-					zip_stat_init(&st);
-					if (zip_stat_index(tz.get(), pos, 0, &st) < 0) {
-						throw NoDataException(std::format("Unable to stat {}", cfilename).c_str());
-					}
-					std::vector<std::byte> data(st.size);
-					ZipContainedFile zfile(zip_fopen_index(tz.get(), st.index, 0));
-					if (!zfile) {
-						throw NoDataException(std::format("Unable to open {}", cfilename).c_str());
-					}
-					auto zfret = zip_fread(zfile.get(), data.data(), data.size());
-					if (zfret == -1) {
-						throw NoDataException(std::format("Unable to read {}", cfilename).c_str());
-					}
-					try {
-						fs::create_directories(c.chartpath.parent_path());
-					}
-					catch (fs::filesystem_error& e) {
-						OutputDebugStringA(std::format("Unable to Create: {}\nError: {}, Code: {}\n", c.chartpath.parent_path().string(),
-							e.code().message(), e.code().value()).c_str());
-						throw;
-					}
-					std::ofstream cfileout(c.chartpath, std::ios::binary | std::ios::trunc);
-					if (!cfileout) {
-						throw fs::filesystem_error(std::format("Unable to open output file {} for writing.",c.chartpath.string()),
-							std::make_error_code(std::errc::bad_file_descriptor));
-					}
-					cfileout.write(reinterpret_cast<char*>(data.data()), data.size());
-					break;
-				}
+			const auto cfilename = c.chartpath.filename().string();
+			const auto infoit = zip_map.find(cfilename);
+			if (infoit == zip_map.end()) {
+				OutputDebugStringA(std::format("Unable to find {}\n", cfilename).c_str());
+				continue;
 			}
-		//	}
+			const auto& [archive, index, filesize] = infoit->second;
+			work[archive].push_back(extract_job{ &c, index, filesize });
 		}
+		//Built from the airport records Created up front and on this thread because
+		//create_directories is not atomic, and an airport's charts can be split across volumes, so two
+		//workers would otherwise race to create the same directory.
+		std::size_t dirs_made = 0;
+		for (const auto& [_, arec] : recmap) {
+			if (!arec.has_charts) continue;
+			const auto dir = chartdir / artcc_names_map.at(arec.artcc) / arec.airport_id_filestring;
+			std::error_code ec;
+			fs::create_directories(dir, ec);
+			if (ec && !fs::is_directory(dir)) {
+				throw fs::filesystem_error(std::format("Unable to create {}", dir.string()), ec);
+			}
+			++dirs_made;
+		}
+		OutputDebugStringA(std::format("extraction split: {} / {} / {} / {} charts into {} dirs\n",
+			work[0].size(), work[1].size(), work[2].size(), work[3].size(), dirs_made).c_str());
+		prof_mark("Group + create directories");
+
+		std::atomic<bool> failed{ false };
+		std::mutex err_mtx;
+		std::exception_ptr first_error;
+		{
+			std::vector<std::jthread> workers;
+			workers.reserve(work.size());
+			for (int tz = 0; tz < static_cast<int>(work.size()); ++tz) {
+				if (work[tz].empty()) continue;
+				workers.emplace_back([&, tz] {
+					//Nothing may escape a worker: an exception crossing the thread boundary would call
+					//std::terminate. The first one is kept and rethrown on the calling thread after the join.
+					try {
+						std::vector<std::byte> data;   //reused across charts to avoid ~6k allocations per worker
+						for (const auto& job : work[tz]) {
+							if (failed.load(std::memory_order_relaxed)) return;
+							const auto& path = job.rec->chartpath;
+							const auto cfilename = path.filename().string();
+							data.resize(job.filesize);
+							ZipContainedFile zfile(zip_fopen_index(tppzip[tz].get(), job.index, 0));
+							if (!zfile) {
+								throw NoDataException(std::format("Unable to open {}", cfilename).c_str());
+							}
+							const auto zfret = zip_fread(zfile.get(), data.data(), data.size());
+							if (zfret < 0 || static_cast<zip_uint64_t>(zfret) != job.filesize) {
+								throw NoDataException(std::format("Unable to read {}", cfilename).c_str());
+							}
+							std::ofstream cfileout(path, std::ios::binary | std::ios::trunc);
+							if (!cfileout) {
+								throw fs::filesystem_error(std::format("Unable to open output file {} for writing.", path.string()),
+									std::make_error_code(std::errc::bad_file_descriptor));
+							}
+							cfileout.write(reinterpret_cast<char*>(data.data()), data.size());
+						}
+					}
+					catch (...) {
+						std::scoped_lock lk(err_mtx);
+						if (!first_error) first_error = std::current_exception();
+						failed.store(true, std::memory_order_relaxed);
+					}
+				});
+			}
+		}   //jthread destructors join here
+		if (first_error) std::rethrow_exception(first_error);
 		if (!bugfix_remove.empty()) {
 			for (auto& [bfrai,bfrpn] : bugfix_remove) {
 				std::erase_if(charts_to_add, [&](ChartRecord item) {
@@ -1061,26 +1155,7 @@ namespace charts {
 					});
 			}
 		}
-		//copy artcc-wide additions, if any
-		//if (!artcc_wide_additions.empty()) {
-		//	for (auto& i : artcc_wide_additions) {
-		//		auto a = std::get<0>(i);
-		//		auto p = std::get<2>(i);
-		//		auto outpath = chartdir / artcc_names_map.at(a) / "Additions" / p.filename();
-		//		std::error_code ec;
-		//		fs::create_directory(outpath.parent_path());
-		//		fs::copy_file(p, outpath, fs::copy_options::overwrite_existing,ec);
-		//		if (!ec) {
-		//			std::get<2>(i) = outpath;
-		//		}
-		//	}
-		//}
-		//copy cwt file if any
-		//if (!cwt_file.empty()) {
-		//	auto outpath = chartdir / cwt_file.filename();
-		//	fs::copy_file(cwt_file, outpath, fs::copy_options::overwrite_existing);
-		//	cwt_file = outpath;
-		//}
+		prof_mark("Chart extraction to tree");
 		//Prep Control Records
 		auto cycle = current_cycle.GetCurrentAiracCycle();
 		ControlRecord lcontrol = {};
@@ -1144,6 +1219,16 @@ namespace charts {
 			}
 			db.update(lcontrol);
 		}
+		prof_mark("DB writes + manual charts");
+		//Started only now: the delete and the extraction above are both NTFS metadata work, which the
+		//filesystem serialises per volume, so running them together merely queues.
+		if (!stale_tree.empty()) {
+			//Detached thread. Use error_code overload to avoid std::terminate on exception.
+			std::thread([oc = std::move(stale_tree)]() noexcept {
+				std::error_code rc;
+				fs::remove_all(oc, rc);
+			}).detach();
+		}
 	}
 	ARTCCInfo FAAChartProcessor::GetAirspaceClassInfo(ARTCC artcc) {
 		using sqlite_orm::where;
@@ -1198,12 +1283,19 @@ namespace charts {
 		}
 		return AirportLookup{ recs.front().artcc, recs.front().airspace_class };
 	}
-	void FAAChartProcessor::CleanCharts(const std::filesystem::path& tempdir, bool keep_temp) {
-		//first clean up organized charts
-		if (fs::exists(chartdir)) {
+	//Returns the old tree to delete later, essentially garbage collection for after the reload
+	//this elminates the ntfs metadata problem with doing deletion and extraction simultaneously
+	fs::path FAAChartProcessor::CleanCharts(const std::filesystem::path& tempdir, bool keep_temp) {
+		auto oldchartdir = chartdir.parent_path() / "charts.old";
+		std::error_code ec;
+		fs::rename(chartdir, oldchartdir, ec);
+		if (ec)
+		{
+			//if rename fails, remove charts directly
 			fs::remove_all(chartdir);
-			fs::create_directories(chartdir);
+			oldchartdir.clear();
 		}
+		fs::create_directories(chartdir);
 		//now remove temporary files
 		if (!keep_temp) {
 			std::array<fs::path, 7> chpaths{ tempdir / "TPPA.zip",tempdir / "TPPB.zip",tempdir / "TPPC.zip",tempdir / "TPPD.zip",tempdir / "TPPE.zip",
@@ -1217,6 +1309,7 @@ namespace charts {
 				fs::remove(tempdir);
 			}
 		}
+		return oldchartdir;
 	}
 	FAAChartProcessor::~FAAChartProcessor() {
 		auto db = GetDatabaseHandle();
