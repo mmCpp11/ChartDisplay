@@ -599,9 +599,14 @@ int wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int
 	//deal with command line
 	std::wstring_view cmdline(lpCmdLine);
 	if (cmdline.contains(L"--help") || cmdline.contains(L"-h")) {
-		Win64Wrapper::CreateMessageBox(L"Usage: ChartDisplay.exe", L"Help");
+		Win64Wrapper::CreateMessageBox(
+			L"Usage: ChartDisplay.exe [--profile]\n\n"
+			L"  --profile   Append per-phase chart update timings to profile.log in the download folder.",
+			L"Help");
 		return 0;
 	}
+	//Set before any worker thread exists, so charts::profiling_enabled needs no synchronisation.
+	charts::profiling_enabled = cmdline.contains(L"--profile");
 	prog_hinst = hInstance;
 	charts::FAAChartProcessor chart;
 	chartaccessor = &chart;
@@ -1647,20 +1652,16 @@ INT_PTR CustomChartProc(HWND hdlg, UINT msg, WPARAM wParam, LPARAM lParam) {
 			case IDC_BUTTONFILE:
 			{
 				//Open File Dialog and Place the text in the edit box
-				IFileOpenDialog* temp_fo_ptr = nullptr;
-				IShellItem* temp_item = nullptr;
 				try {
-					CheckCOMResult(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_ALL, IID_IFileOpenDialog,
-						reinterpret_cast<void**>(&temp_fo_ptr)));
-					GenericCOMPtr<IFileOpenDialog> fileopen(temp_fo_ptr);
-					temp_fo_ptr = nullptr;
+					//com_ptr's constructor AddRefs, so fill directly instead of using a temp pointer.
+					GenericCOMPtr<IFileOpenDialog> fileopen;
+					CheckCOMResult(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_ALL,
+						IID_PPV_ARGS(&fileopen)));
 					CheckCOMResult(fileopen->Show(hdlg));
-					CheckCOMResult(fileopen->GetResult(&temp_item));
-					GenericCOMPtr<IShellItem> resitem(temp_item);
-					wchar_t* temp_buffer = nullptr;
-					CheckCOMResult(resitem->GetDisplayName(SIGDN_FILESYSPATH, &temp_buffer));
-					std::unique_ptr<wchar_t, decltype(&CoTaskMemFree)> fn_selected_buffer(temp_buffer, &CoTaskMemFree);
-					temp_buffer = nullptr;
+					GenericCOMPtr<IShellItem> resitem;
+					CheckCOMResult(fileopen->GetResult(&resitem));
+					Win64Wrapper::CoTaskString fn_selected_buffer;
+					CheckCOMResult(resitem->GetDisplayName(SIGDN_FILESYSPATH, &fn_selected_buffer));
 					SetDlgItemText(hdlg, IDC_PATH, fn_selected_buffer.get());
 				}
 				catch (_com_error& e) {

@@ -27,6 +27,8 @@ module; //insert windows.h into the global module fragment
 #include <shlobj.h>
 #include <objbase.h>
 #include <comdef.h>
+#include <wil/com.h>
+#include <wil/resource.h>
 
 export module BasicWindowsWrapperModule;
 
@@ -1110,13 +1112,8 @@ namespace Win64Wrapper {
         template<typename T>
         concept COMInterface = std::derived_from<T, IUnknown>;
         template<COMInterface T>
-        struct COMDeleter {
-            void operator()(T* ptr) {
-                ptr->Release();
-            }
-        };
-        template<COMInterface T>
-        using GenericCOMPtr = std::unique_ptr<T, COMDeleter<T>>;
+        using GenericCOMPtr = wil::com_ptr<T>;
+        using CoTaskString = wil::unique_cotaskmem_string;
 
         struct COMInit {
             const HRESULT hr;
@@ -1175,14 +1172,12 @@ namespace Win64Wrapper {
         LPARAM PtrToLP(T* ptr) {
             return std::bit_cast<LPARAM>(ptr);
         }
+        //This exists because T cannot be deduced from T* to std::nullptr_t
         inline LPARAM PtrToLP(std::nullptr_t) noexcept
         {
             return 0;
         }
-        //associated windows, store a HWND to the class it is associated with in the window proc of the associated class
-        //WPARAM: either 1 for store or 2 for remove
-        //LPARAM on store: HWND of the window that the window of the proc has been associated to. On remove: not used
-        const UINT WM_ASSOCIATEDWINDOW = (WM_USER + 0x0700);
+
         enum class HookTypes {
             InputMessage = WH_MSGFILTER,
             //        SysInputMessage = WH_SYSMSGFILTER,
@@ -1198,16 +1193,9 @@ namespace Win64Wrapper {
             ForegroundIdle = WH_FOREGROUNDIDLE,
             Shell = WH_SHELL
         };
-        //Set Hook Handle with a call to SetWindowsHookEx
-        //workaround for MSVC bug (can't export with lambda in unevaluated context or with anonymous struct
-        //Bug: https://developercommunity.visualstudio.com/t/Modules-export-anonymous-struct-variab/10177181
-        struct HookDeleter {
-            void operator()(HHOOK hook) {
-                UnhookWindowsHookEx(hook);
-            }
-        };
-        using HookHandle = std::unique_ptr<std::remove_pointer_t<HHOOK>, HookDeleter>;
-        //    export using HookHandle = std::unique_ptr < std::remove_pointer_t<HHOOK>, decltype([](HHOOK hook) {UnhookWindowsHookEx(hook);}) > ; //should work
+        //Set Hook Handle with a call to SetWindowsHookEx. wil::unique_hhook is
+        //unique_any<HHOOK, decltype(&UnhookWindowsHookEx), UnhookWindowsHookEx>
+        using HookHandle = wil::unique_hhook;
         enum class MessageBoxResponse {
             Error=0,
             Ok = IDOK,
@@ -2009,23 +1997,17 @@ namespace Win64Wrapper {
         template<Startupinfo T = STARTUPINFO>
         struct ProcCreationInfo {
             T st;
-            PROCESS_INFORMATION pi;
+            //unique_struct derives from PROCESS_INFORMATION, so pi.hProcess and &pi still work. It
+            //zero-inits on construction and closes only hThread/hProcess on destruction.
+            wil::unique_process_information pi;
             ProcCreationInfo() {
                 ZeroMemory(&st, sizeof(T));
-                ZeroMemory(&pi, sizeof(PROCESS_INFORMATION));
                 if constexpr (std::is_same_v<T, STARTUPINFOEX>) {
                     st.StartupInfo.cb = sizeof(STARTUPINFOEX);
                 }
                 else {
                     st.cb = sizeof(STARTUPINFO);
                 }
-            }
-            ~ProcCreationInfo() {
-                //Only the process/thread handles returned by CreateProcess are owned here. STARTUPINFO's
-                //std handles (if a caller ever sets them for redirection) belong to whoever created them,
-                //so closing them here would be a double-close; leave them alone.
-                if (pi.hThread) CloseHandle(pi.hThread);
-                if (pi.hProcess) CloseHandle(pi.hProcess);
             }
         };
         enum class ProcCreationFlags : DWORD {
@@ -2207,11 +2189,6 @@ namespace Win64Wrapper {
         }
         Window(const Window&) = delete;
          ~Window() noexcept {
-             //remove the hwnd from the window procs to prevent recursion, then destroy these windows before main window
-             for (auto& i : associated_windows) {
-                 SendMessage(i->GetHWND(), WM_ASSOCIATEDWINDOW, 2, PtrToLP<LPARAM>(nullptr));
-             }
-             associated_windows.clear();
              win.reset();
         };
 
@@ -2338,41 +2315,6 @@ namespace Win64Wrapper {
             }
             return wcold;
         }
-        //associate windows to this window (guaranteed that the last reference will not go out of scope until this window class is destroyed
-        void AssociateWindow(std::shared_ptr<Window> winptr) {
-            using namespace literals;
-            winptr->is_associated = true;
-            associated_windows.push_back(winptr);
-            SendMessage(winptr->GetHWND(), WM_ASSOCIATEDWINDOW, 1_wp, PtrToLP(win.get()));
-        }
-        //Get assocaited window weak_ptr
-        std::optional<std::weak_ptr<Window>> GetAssociatedWindow(HWND win_handle) const noexcept {
-            auto ret = std::ranges::find_if(associated_windows, [&win_handle](std::shared_ptr<Window> ptr) {
-                if (ptr->GetHWND() == win_handle) return true;
-                else return false;
-                });
-            if (ret == associated_windows.end()) {
-                return std::nullopt;
-            }
-            else {
-                return *ret;
-            }
-        }
-        std::vector<std::shared_ptr<Window>> GetAllAssociatedWindows() const noexcept {
-            return associated_windows;
-        }
-        //remove associated window
-        void PopAssociatedWindow(HWND win_handle) {
-            using namespace literals;
-            std::erase_if(associated_windows, [&win_handle](std::shared_ptr<Window> ptr) {
-                if (ptr->GetHWND() == win_handle) {
-                    ptr->is_associated = false;
-                    return true;
-                }
-                else return false;
-                });
-            SendMessage(win_handle, static_cast<UINT>(WM_ASSOCIATEDWINDOW), 2_wp, 0_lp);
-        }
         //Simple Wrapper around Send/PostMessage. post: if true, use PostMessage, if false use SendMessage
         long long SendWinMsg(UINT msg, WPARAM wParam, LPARAM lParam, bool post = false) {
             LRESULT res = {};
@@ -2383,9 +2325,6 @@ namespace Win64Wrapper {
                 res = PostMessage(win.get(), msg, wParam, lParam);
             }
             return res;
-        }
-        [[nodiscard]] bool IsAssociated() const noexcept {
-            return is_associated;
         }
         //returns the managed handle for passing to Windows functions
         [[nodiscard]] HWND operator()() const noexcept{
@@ -2458,8 +2397,6 @@ namespace Win64Wrapper {
         ExtraWindowData extra_data;
         RegisteredWindow win;
         WndProcFunctor additional_callback;
-        bool is_associated = false;
-        std::vector<std::shared_ptr<Window>> associated_windows;
         //handle specific messages. After processing, if there is an additonal_callback, pass all messages onto it unless a specific message disallows this
         // (runaddproc=false). If there is no callback, run DefWindowProc for unhandled messages and return 0 for handled ones
         //This function serves messages with same handling for all windows. To be specific, supply an additional callback to process them
